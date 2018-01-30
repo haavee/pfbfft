@@ -95,8 +95,8 @@ class ReadBeamformData(object):
 #            #print("takewhile/end_predicate for df=",df.file_name," start=",df.begin_spectra, " end=",df.end_spectra,"  [looking for ",self.requested_end_spectrum,"]")
 #            return df.end_spectra <= self.requested_end_spectrum
         def reductor(acc, nextfile):
-            if acc and (nextfile.begin_spectra != (acc[-1].end_spectra + 1)):
-                raise AssertionError("Missing spectra in selected time range: {0}.end_spectra != {1}.begin_spectra".format(acc[-1].file_name, next_file.begin_spectra))
+            if acc and (nextfile.begin_spectra != acc[-1].end_spectra ):
+                raise AssertionError("Missing spectra in selected time range: {0}.end_spectra[{2}] != {1}.begin_spectra[{3}]".format(acc[-1].file_name, nextfile.file_name, acc[-1].end_spectra, nextfile.begin_spectra))
             return acc.append( nextfile ) or acc
 #        files  = reduce(reductor, itertools.takewhile(end_predicate, itertools.dropwhile(start_predicate, obs.file_list)), [])
         files  = reduce(reductor, takewhile(lambda df: df.begin_spectra < self.end_spectrum,
@@ -195,5 +195,6 @@ def read_beamformdata_old(obs, *args, **kwargs):
     return rv
 
 read_beamformdata = ReadBeamformData
-freq_to_time      = sigproc.synthesizer_real( sigproc.replacer((0, 0+0j)), sigproc.auto_comb(40) )
+#freq_to_time      = sigproc.synthesizer_real( sigproc.replacer((0, 0+0j)), sigproc.auto_comb(40) )
+freq_to_time      = sigproc.synthesizer_real( sigproc.replacer((0, 0+0j)) )
 ddc               = sigproc.dbbc
