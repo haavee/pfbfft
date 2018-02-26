@@ -5,6 +5,20 @@ ylppa = lambda *args, **kwargs: lambda f: f(*args, **kwargs)
 
 D = userinput.debug
 
+class Spectrum(numpy.ndarray):
+    def __new__(cls, input_array, **kwargs):
+        # Input array is an already formed ndarray instance
+        # We first cast to be our class type
+        obj = numpy.asarray(input_array).view(cls)
+        # add the new attributes to the created instance
+        obj.__dict__ = kwargs
+        return obj
+
+    def __array_finalize__(self, obj):
+        # see InfoArray.__array_finalize__ for comments
+        if obj is not None:
+            self.__dict__ = getattr(obj, '__dict__', dict())
+
 # freqs = [f0, f1, f2, ...., fN]
 #  assume: freqs are increasing such that f(N+1) >= f(N)
 # return:
@@ -48,6 +62,48 @@ def rdbeamform(fn):
                 print("Caught exception reading heap #",heapnum," - ",E)
                 raise StopIteration
 
+def rdbeamform_raw(fn):
+    # code for reading n heaps:
+    #a = numpy.fromfile(fn, dtype=numpy.int8, count=1*1024*128*2)
+    #b = a.astype(numpy.float32)
+    #c = b.view(numpy.complex64)
+    #d = c.reshape(1, 1024, 128).transpose((0, 2, 1))
+    with open(fn) as infile:
+        # read one heap
+        heapnum = 0
+        while True:
+            try:
+                curHeap = numpy.fromfile(infile, dtype=numpy.int8, count=1024*128*2).astype(numpy.float32).view(numpy.complex64).reshape((1024,128)).T #transpose((1,0))
+                for s in range(curHeap.shape[0]):
+                    yield curHeap[s]
+                heapnum = heapnum + 1
+            except Exception as E:
+                print("Caught exception reading heap #",heapnum," - ",E)
+                raise StopIteration
+
+def rdbeamform_heap(fn, nheap=1):
+    # code for reading n heaps:
+    #a = numpy.fromfile(fn, dtype=numpy.int8, count=1*1024*128*2)
+    #b = a.astype(numpy.float32)
+    #c = b.view(numpy.complex64)
+    #d = c.reshape(1, 1024, 128).transpose((0, 2, 1))
+    with open(fn) as infile:
+        # read one heap
+        heapnum = 0
+        while True:
+            try:
+                yield Spectrum(numpy.fromfile(infile, dtype=numpy.int8, count=nheap*1024*128*2)\
+                                .astype(numpy.float32)\
+                                .view(numpy.complex64)\
+                                .reshape((nheap, 1024,128))\
+                                .transpose((0, 2, 1))\
+                                .reshape((nheap * 128, 1024)),
+                                DCEdge=(1700.49e6 + 200e6), BW=-400e6)
+                heapnum = heapnum + 1
+            except Exception as E:
+                print("Caught exception reading heap #",heapnum," - ",E)
+                raise StopIteration
+
 def averager(quant, src):
     data_sum = quant_sum = None #numpy.ndarray(0)
     for s in src:
@@ -67,6 +123,14 @@ def replacer(mods, src):
     values            = numpy.array( list(values) )
     for s in src:
         s[indices] = values
+        yield s
+
+def replacer_h(mods, src):
+    (indices, values) = zip(*mods)
+    indices           = list(indices)
+    values            = numpy.array( list(values) )
+    for s in src:
+        s[:,indices] = values
         yield s
 
 def auto_comb(n, src):
@@ -453,110 +517,73 @@ def dbbc(lo, sr_in, sr_out, samples):
     samples = numpy.array(numpy.real(samples), dtype=numpy.complex64)
 
     # multiply by complex cosine exp( -j * 2 * pi * f * t)
-    D("mixing ...")
-    mixed   = samples * numpy.exp( -2j * numpy.pi * lo * numpy.array(numpy.arange(len(samples))/sr_in, dtype=numpy.float) )
+    D("mixing ... samples.dtype=",samples.dtype)
+    mixed  = samples * numpy.exp( -2j * numpy.pi * lo * (numpy.arange(len(samples), dtype=numpy.float64)/numpy.float64(sr_in))  )
     D("   len=",len(mixed)," dtype=",mixed.dtype)
 
     #down    = SIGNAL.resample_poly(mixed, L, M, window=('kaiser', 6.76))
     #coeffs  = SIGNAL.firwin(129, float(sr_out/sr_in)/2, window=userinput.window)
+    D("resampling *",L,"/",M," [window=",userinput.window,"]")
     down    = SIGNAL.resample_poly(mixed, L, M, window=userinput.window)
-#    # upsample
-#    D("upsampling ...")
-#    up      = numpy.zeros( len(mixed) * L, dtype=numpy.complex128 )
-#    up[::L] = mixed
-#    D("   len=",len(up)," dtype=",up.dtype)
-#
-#    # Pass the upsampled signal through a LPF, then downsample
-#    D("lfiltering ...")
-#    #up      = SIGNAL.lfilter(SIGNAL.firwin(129, float(sr_out/2)/sr_in), 1, up)
-#    #coeffs  = SIGNAL.firwin(128, float((sr_out*L)/(sr_in*M)), window=userinput.window)
-#    coeffs  = SIGNAL.firwin(128, float((sr_out*L)/(sr_in*M)), window=userinput.window)
-#    #coeffs  = SIGNAL.firwin(128, 0.5)
-#    #D("coeffs: ",coeffs)
-#    up      = SIGNAL.lfilter(coeffs, 1, up)
-#    D("   len=",len(up)," dtype=",up.dtype)
-    D("downsampling ...")
-#    down    = up[::M]
     D("   len=",len(down)," dtype=",down.dtype)
 
     coeffs_r= hilbert.Hilbert45(301, 0.05, 0.05, 0.45, 0)
     coeffs_i= hilbert.Hilbert45(301, 0.05, 0.05, 0.45, 1)
     re      = SIGNAL.lfilter(coeffs_r,                 1, down.real)
     im      = SIGNAL.lfilter(coeffs_i,                 1, down.imag)
-    #re      = SIGNAL.lfilter(coeffs,                 1, down.real)
-    #im      = SIGNAL.lfilter(list(reversed(coeffs)), 1, down.imag)
-    # Sweet. Extract re,im and do Hilbert on the im
-    # https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.hilbert.html
-#    re      = down.real
-#    D("Hilberting ...")
-#    coeffs  = numpy.fft.fftshift(numpy.fft.ifft([0]+[1]*100+[0]*100))
-#    hilb    = SIGNAL.hilbert(down.imag)
-    #hilb    = FFT.hilbert(down.imag)
-#   #hilb    = SIGNAL.lfilter(coeffs, 1, down.imag)
-#    im      = numpy.imag(hilb)
-#    im_org  = numpy.real(hilb)
-#    D("len(re) = ",len(re)," shape=",re.shape," dtype=",re.dtype)
-#    D("len(im) = ",len(im)," shape=",im.shape," dtype=",im.dtype)
-#    summary(down.imag, "Im(down)")
-#    summary(im_org, "Re(hilb)")
+
     summary(down.real, "Re(down)")
     summary(down.imag, "Im(down)")
     summary(re, "Re(hilb)")
     summary(im, "Im(hilb)")
 
-    # Now we have USB = re + im, LSB = re - im
-    D("making LSB ...")
-    #usb     = re + im #down.real #re + im
-    lsb     = re + im #down.real #re + im
     D("making USB ...")
-    #lsb     = re - im #down.imag #re - im
-    usb     = re - im #down.imag #re - im
+    usb     = re - im 
+    D("making LSB ...")
+    lsb     = re + im
 
     # About time to plot some things
-    #f, plots = plt.subplots(nrows=6, ncols=1)
     f, plots = plt.subplots(nrows=4, ncols=1)
     D("plot samples ...")
     plots[0].plot( samples )
-    #D("plot up ... len=",len(up))
-    #plots[1].plot( up )
     D("plot down ... len=",len(down))
     plots[1].plot( down )
-    # plot the ffts of down
-    stack  = None
-    ftsize = int(2*(userinput.ftsize//2)) #int(math.pow(2, math.floor(math.log2(len(usb)/4)))) #/128
-    D("ftsize=",ftsize)
-    D("FFT usb/ len=",len(usb))
-    #for i in numpy.arange(0, (len(usb)//ftsize)*ftsize, 2*ftsize):
-    for i in numpy.arange(0, (len(usb)//ftsize)*ftsize, ftsize):
-        #D("usb/i={0}".format(i))
-        #ft    = numpy.fft.fft( usb[i:i+2*ftsize] )
-        ft    = numpy.fft.fft( usb[i:i+ftsize] )
-        stack = numpy.vstack([stack, ft]) if stack is not None else ft
-    D("stack.shape = ",stack.shape)
-    # BW spanned by x-axis = sr_out / 2 
-    #(x_axis_ft, unit) = rescale(numpy.linspace(0, sr_out/2, ftsize/2) + lo)
-    x_axis_u          = numpy.linspace(lo, lo+sr_out/2, ftsize/2)
+
+    # The plotting part
+    ftsize = int(2*(userinput.ftsize//2)) 
+    nfft   = int(len(lsb)//ftsize)
+    D("ftsize=",ftsize," nfft=",nfft)
+
+    # Do the USB
+    D("FFT usb/ len=",len(usb), " using ",ftsize*nfft)
+    spectra = numpy.fft.fft(usb[:(ftsize * nfft)].reshape((nfft, ftsize)), axis=1)
+    usb_freq = numpy.sum(numpy.abs(spectra), axis=0)[:ftsize//2]
+
+    if lo<0:
+        x_axis_u          = numpy.linspace(lo+(sr_out/2), lo, ftsize//2)
+    else:
+        x_axis_u          = numpy.linspace(lo, (lo+sr_out/2), ftsize//2)
     (u_scale, u_unit) = rescale(x_axis_u, "Hz")
 
-    usb_freq = numpy.sum(numpy.abs(stack), axis=0)[:ftsize//2]
+    plots[2].set_xlim(x_axis_u[0]/u_scale, x_axis_u[-1]/u_scale)
     plots[2].plot( x_axis_u/u_scale, usb_freq, 'r', alpha=0.5 )
-    plots[3].set_xlabel(u_unit)
+    plots[2].set_xlabel(u_unit)
     plots[2].set_title("FFT/USB")
 
-    stack  = None
-    #for i in numpy.arange(0, (len(lsb)//ftsize)*ftsize, 2*ftsize):
-    for i in numpy.arange(0, (len(lsb)//ftsize)*ftsize, ftsize):
-        #D("lsb/i={0}".format(i))
-        #ft    = numpy.fft.fft( lsb[i:i+2*ftsize] )
-        ft    = numpy.fft.fft( lsb[i:i+ftsize] )
-        stack = numpy.vstack([stack, ft]) if stack is not None else ft
+    # Repeat for LSB
+    D("FFT usb/ len=",len(lsb), " using ",ftsize*nfft)
+    spectra  = numpy.fft.fft(lsb[:(ftsize * nfft)].reshape((nfft, ftsize)), axis=1)
+    lsb_freq = numpy.sum(numpy.abs(spectra), axis=0)[:ftsize//2]
 
-    lsb_freq = numpy.sum(numpy.abs(stack), axis=0)[:ftsize//2]
-    x_axis_l          = numpy.linspace(lo-sr_out/2, lo, ftsize/2)
+    if lo<0:
+        x_axis_l          = numpy.linspace(lo, lo-(sr_out/2), ftsize//2)
+    else:
+        x_axis_l          = numpy.linspace(lo-(sr_out/2), lo, ftsize//2)
     (l_scale, l_unit) = rescale(x_axis_l, "Hz")
-    plots[3].set_xlabel(l_unit)
+
+    plots[3].set_xlim(x_axis_l[0]/l_scale, x_axis_l[-1]/l_scale)
     plots[3].plot( x_axis_l/l_scale, lsb_freq, 'g', alpha=0.5 )
-    #plots[3].plot( lo - x_axis_ft, numpy.sum(numpy.abs(stack), axis=0)[:ftsize], 'g', alpha=0.5 )
+    plots[3].set_xlabel(l_unit)
     plots[3].set_title("FFT/LSB")
 
     # Do loox0ring for peaks in USB/LSB
@@ -568,12 +595,8 @@ def dbbc(lo, sr_in, sr_out, samples):
     for p in idx_peakert(lsb_freq, 0.9):
         print("Found peak in LSB: f={0:.8f}Hz [bin={1}]".format( x_axis_l[p], p))
         plots[3].plot( x_axis_l[p]/l_scale, lsb_freq[p], marker='v', color='g')
-    #plots[4].plot(coeffs)
-    #plots[4].set_title("filter coefficients")
-    #plots[5].plot(im)
-    #plots[5].plot(re)
-    #plots[5].plot(im_org)
-    #plt.show()
+
+    return (lsb, usb)
 
         
 
@@ -983,8 +1006,12 @@ def synthesizer_g_real(bw, spectrum_src, **opts):
         #plots[1].plot( numpy.real(ftmp) )
         #plots[2].plot( numpy.imag(ftmp) )
         timeseries = numpy.hstack([timeseries, ftmp])
-    plots[0].axvspan(userinput.lo/x_scale, (userinput.lo+userinput.bw)/x_scale, alpha=0.5, facecolor='r')
-    plots[0].axvspan((userinput.lo-userinput.bw)/x_scale, userinput.lo/x_scale, alpha=0.5, facecolor='g')
+    if userinput.lo<0:
+        plots[0].axvspan(userinput.lo/x_scale, (userinput.lo-userinput.bw)/x_scale, alpha=0.5, facecolor='r')
+        plots[0].axvspan((userinput.lo+userinput.bw)/x_scale, userinput.lo/x_scale, alpha=0.5, facecolor='g')
+    else:
+        plots[0].axvspan(userinput.lo/x_scale, (userinput.lo+userinput.bw)/x_scale, alpha=0.5, facecolor='r')
+        plots[0].axvspan((userinput.lo-userinput.bw)/x_scale, userinput.lo/x_scale, alpha=0.5, facecolor='g')
     print("timeseries length = ",len(timeseries), " dtype = ",timeseries.dtype)
     plots[1].plot(numpy.real(timeseries) )
     summary(numpy.real(timeseries), "Re(timeseries)")
@@ -999,6 +1026,89 @@ def synthesizer_g_real(bw, spectrum_src, **opts):
     x              = numpy.linspace(0, bw, ssize/2)[::sb]
     (x_scal, unit) = rescale(x, "Hz")
     plots[2].plot(x/x_scal , numpy.sum(numpy.abs(stack), axis=0)[:ssize//2] )
+    plots[2].set_xlabel(unit)
+    return numpy.real(timeseries)
+
+def synthesizer_g_real_2(bw, spectrum_src, **opts):
+    import matplotlib.pyplot as plt
+
+    # we must know if the spectrum is LSB or USB
+    # assume that in both cases freq increases with index
+    defaults = { 'sideband': None } # -1 == lower, +1 == upper
+    defaults.update( opts ) 
+    sb = defaults['sideband']
+    if sb not in [1,-1]:
+        raise RuntimeError("sideband parameter " + "not set" if sb is None else "can only be -1 or +1")
+    # abs, ifft_re, ifft_im, timeseries, ft_re, ft_im
+    # 0    1        2        3           4      5
+    # 0                      1           2
+    #f, plots    = plt.subplots(nrows=6, ncols=1)
+    f, plots    = plt.subplots(nrows=3, ncols=1)
+    x_freq      = numpy.linspace(0, bw, 1024)[::sb]
+    x_scale,un  = rescale(x_freq, "Hz")
+    timeseries  = numpy.ndarray(0)
+    #for s in take(25, spectrum_src): #spectra:
+    for s in take(userinput.nspec, spectrum_src): #spectra:
+        plots[0].plot( x_freq/x_scale, numpy.abs(s) )
+
+        # spectrum is symmetric - that is, we NEED it to be in order to get a real timeseries
+        ftmp = numpy.fft.irfft(s, 2*len(s))
+        timeseries = numpy.hstack([timeseries, ftmp])
+    plots[0].axvspan(userinput.lo/x_scale, (userinput.lo+userinput.bw)/x_scale, alpha=0.5, facecolor='r')
+    plots[0].axvspan((userinput.lo-userinput.bw)/x_scale, userinput.lo/x_scale, alpha=0.5, facecolor='g')
+    print("timeseries length = ",len(timeseries), " dtype = ",timeseries.dtype)
+    plots[1].plot(numpy.real(timeseries) )
+    summary(numpy.real(timeseries), "Re(timeseries)")
+    summary(numpy.imag(timeseries), "Im(timeseries)")
+    stack = None
+    ssize = int(2*(userinput.ftsize//2))
+    #ftsize= 
+    #for i in numpy.arange(0, len(timeseries), ssize):
+    for i in numpy.arange(0, ssize * int(len(timeseries)//ssize), ssize):
+        ft = numpy.fft.fft( numpy.real(timeseries[i:i+ssize]) )
+        stack = numpy.vstack([stack, ft]) if stack is not None else ft
+    x              = numpy.linspace(0, bw, ssize/2)[::sb]
+    (x_scal, unit) = rescale(x, "Hz")
+    plots[2].plot(x/x_scal , numpy.sum(numpy.abs(stack), axis=0)[:ssize//2] )
+    plots[2].set_xlabel(unit)
+    return numpy.real(timeseries)
+
+def synthesizer_g_real_2_heap(bw, spectrum_src, **opts):
+    import matplotlib.pyplot as plt
+
+    # abs, ifft_re, ifft_im, timeseries, ft_re, ft_im
+    # 0    1        2        3           4      5
+    # 0                      1           2
+    f, plots    = plt.subplots(nrows=3, ncols=1)
+    x_freq      = numpy.linspace(0, bw, 1024)
+    x_scale,un  = rescale(x_freq, "Hz")
+    timeseries  = numpy.ndarray(0)
+    plots[0].set_xlim(x_freq[0]/x_scale, x_freq[-1]/x_scale)
+    for s in take(userinput.nspec, spectrum_src):
+        plots[0].plot( x_freq/x_scale, numpy.sum(numpy.abs(s), axis=0) )
+
+        # spectrum is symmetric - that is, we NEED it to be in order to get a real timeseries
+        ftmp = numpy.fft.irfft(s, 2*s.shape[1], axis=1)
+        timeseries = numpy.hstack([timeseries, ftmp.flatten()])
+    if userinput.lo<0:
+        plots[0].axvspan(userinput.lo/x_scale, (userinput.lo-userinput.bw)/x_scale, alpha=0.5, facecolor='g')
+        plots[0].axvspan((userinput.lo+userinput.bw)/x_scale, userinput.lo/x_scale, alpha=0.5, facecolor='r')
+    else:
+        plots[0].axvspan(userinput.lo/x_scale, (userinput.lo+userinput.bw)/x_scale, alpha=0.5, facecolor='r')
+        plots[0].axvspan((userinput.lo-userinput.bw)/x_scale, userinput.lo/x_scale, alpha=0.5, facecolor='g')
+    print("timeseries length = ",len(timeseries), " dtype = ",timeseries.dtype)
+    plots[1].plot(numpy.real(timeseries) )
+    summary(numpy.real(timeseries), "Re(timeseries)")
+    summary(numpy.imag(timeseries), "Im(timeseries)")
+
+    ssize   = int(2*(userinput.ftsize//2))
+    nfft    = int(len(timeseries)//ssize)
+
+    spectra = numpy.fft.fft(timeseries[:(ssize * nfft)].reshape((nfft, ssize)), axis=1)
+    x       = numpy.linspace(0, bw, ssize/2)
+    (x_scal, unit) = rescale(x, "Hz")
+    plots[2].set_xlim(x[0]/x_scal, x[-1]/x_scal)
+    plots[2].plot(x/x_scal, numpy.sum(numpy.abs(spectra), axis=0)[:ssize//2])
     plots[2].set_xlabel(unit)
     return numpy.real(timeseries)
 
