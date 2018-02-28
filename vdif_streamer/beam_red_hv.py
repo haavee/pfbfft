@@ -46,9 +46,10 @@ class Observation(object):
         self.sync_time   = int(self.sync_time)
         self.scale_factor_timestamp = numpy.double(keywords['scale_factor_timestamp'])
         self.centre_freq = numpy.double(keywords['centre_freq']) * 1E6  # implicit MHz in file => to Hz here
-        self.bandwidth   = 400e6    # KAT7 fixed bandwidth of 400MHz
-        self.timestep    = numpy.double(self.n_chans / self.bandwidth) #(2048./800e6) <-- 2 * n_chan / 2 * bw?
-        self.spectra_p_s = fractions.Fraction(int(self.bandwidth), self.n_chans)
+        self.bandwidth   = -400e6    # KAT7 fixed bandwidth of 400MHz
+        self.dc_freq     = self.centre_freq + (abs(self.bandwidth) /2) # DC edge is the highest freq here because it's LSB
+        #self.timestep    = numpy.double(self.n_chans / self.bandwidth) #(2048./800e6) <-- 2 * n_chan / 2 * bw?
+        self.spectra_p_s = fractions.Fraction(int(abs(self.bandwidth)), self.n_chans)
         self.ants        = re.sub(r"[][']", "", keywords['ants']).split(',')
         # Compile the list of datafiles and sort them by start spectrum number
         self.file_list   = sorted(map(partial(DataFile, n_chans=self.n_chans), filter(truth, map(isDataFile, glob.glob(prefix("*.dat"))))), 
@@ -82,23 +83,17 @@ class ReadBeamformData(object):
         #  DC frequency and bandwidth:
         #  For KAT7 frequency axis in the data goes down towards higher channel number (indicated here by neg. bandwidth)
         # DC edge is at index 0 but only the center frequency is in the obs. info
-        self.bandwidth                = -obs.bandwidth
-        self.dc_frequency             = obs.centre_freq - obs.bandwidth/2
+        self.bandwidth                = obs.bandwidth
+        self.dc_frequency             = obs.dc_freq 
         # requested start spectrum will be "absolute spectrum number" on entry or if None => start from the beginning
         self.requested_start_spectrum = self.start_spectrum = self.spectrum_number = obs.begin_spectra if specnum is None else specnum
         self.end_spectrum             = obs.end_spectra if end_specnum is None else end_specnum
         # Skip to the data file containing the requested spectrum
-#        def start_predicate(df):
-#            #print("dropwhile/start_predicate for df=",df.file_name," start=",df.begin_spectra, " end=",df.end_spectra,"  [looking for ",self.requested_start_spectrum,"]")
-#            return df.end_spectra < self.requested_start_spectrum
-#        def end_predicate(df):
-#            #print("takewhile/end_predicate for df=",df.file_name," start=",df.begin_spectra, " end=",df.end_spectra,"  [looking for ",self.requested_end_spectrum,"]")
-#            return df.end_spectra <= self.requested_end_spectrum
         def reductor(acc, nextfile):
             if acc and (nextfile.begin_spectra != acc[-1].end_spectra ):
                 raise AssertionError("Missing spectra in selected time range: {0}.end_spectra[{2}] != {1}.begin_spectra[{3}]".format(acc[-1].file_name, nextfile.file_name, acc[-1].end_spectra, nextfile.begin_spectra))
             return acc.append( nextfile ) or acc
-#        files  = reduce(reductor, itertools.takewhile(end_predicate, itertools.dropwhile(start_predicate, obs.file_list)), [])
+
         files  = reduce(reductor, takewhile(lambda df: df.begin_spectra < self.end_spectrum,
                                             dropwhile(lambda df: df.end_spectra < self.start_spectrum, obs.file_list)), [])
         if not files:
@@ -145,7 +140,79 @@ class ReadBeamformData(object):
                 self.start_spectrum -= self.current_file.begin_spectra + heap_number * nSpecPerHeap
             return self.read_heap()
 
-            
+class ReadBeamformHeap(object):
+    def __init__(self, obs, readheaps = 20, specnum=None, end_specnum=None, verbose=False, raw=True):
+        # give this object extra attributes 
+        self.bandwidth                = obs.bandwidth
+        self.n_heap                   = readheaps
+        # if we know the observation metadata we can precompute a number of things
+        #  'heap size' = number of spectra per heap * (size of spectrum = n_channels * 2 (for Re + Im)) * 1 byte per number
+        self.n_chan                   = obs.n_chans
+        self.heap_size                = nSpecPerHeap * self.n_chan * 2
+        self.obs                      = obs
+        #  DC frequency and bandwidth:
+        #  For KAT7 frequency axis in the data goes down towards higher channel number (indicated here by neg. bandwidth)
+        # DC edge is at index 0 but only the center frequency is in the obs. info
+        self.bandwidth                = obs.bandwidth
+        self.dc_frequency             = obs.dc_freq 
+        # requested start spectrum will be "absolute spectrum number" on entry or if None => start from the beginning
+        self.requested_start_spectrum = self.start_spectrum = self.spectrum_number = obs.begin_spectra if specnum is None else specnum
+        self.end_spectrum             = obs.end_spectra if end_specnum is None else end_specnum
+
+        def reductor(acc, nextfile):
+            if acc and (nextfile.begin_spectra != acc[-1].end_spectra ):
+                raise AssertionError("Missing spectra in selected time range: {0}.end_spectra[{2}] != {1}.begin_spectra[{3}]".format(acc[-1].file_name, nextfile.file_name, acc[-1].end_spectra, nextfile.begin_spectra))
+            return acc.append( nextfile ) or acc
+
+        files  = reduce(reductor, takewhile(lambda df: df.begin_spectra < self.end_spectrum,
+                                            dropwhile(lambda df: df.end_spectra < self.start_spectrum, obs.file_list)), [])
+        if not files:
+            raise RuntimeError("No data found for selected spectrum range {0} -> {1}".format(self.start_spectrum, self.end_spectrum))
+        self.file_list                = iter(files)
+        self.current_fd               = None
+        self.current_nheap            = None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            # Attempt to read as many heaps from the current file as we can
+            act_nheap = min(self.n_heap, self.current_nheap)
+            tmp = sigproc.Spectrum(numpy.fromfile(self.current_fd, dtype=numpy.int8, count=act_nheap*self.heap_size)\
+                                .astype(numpy.float32)\
+                                .view(numpy.complex64)\
+                                .reshape((act_nheap, nSpecPerHeap, self.n_chan))\
+                                .transpose((0, 2, 1))\
+                                .reshape((act_nheap * nSpecPerHeap, self.n_chan)),
+                                DCEdge=0, DCFrequency=self.dc_frequency, BW=self.bandwidth)
+            # ok that worked w/o throwing an exception so now we can update our internals
+            self.current_nheap -= act_nheap
+            # skip to start spectrum only once
+            if self.start_spectrum>0:
+                tmp = tmp[self.start_spectrum:]
+                self.start_spectrum = 0
+            return tmp
+        except Exception as E:
+            # move to next file?
+            if self.current_fd is not None:
+                self.current_fd.close()
+            self.current_file  = next(self.file_list)
+            self.current_fd    = open(self.current_file.file_name)
+            self.current_nheap = self.current_file.file_size // self.heap_size
+            # If the requested start spectrum > 0 we're supposed to seek to a specific spectrum
+            # but the files are blocked in "heaps" of 128 spectra so we must seek 
+            # to the actual heap that contains the requested spectrum
+            if self.start_spectrum>0:
+                # compute heap number - we need it twice
+                heap_number = int((self.start_spectrum - self.current_file.begin_spectra)/nSpecPerHeap)
+                # seek to 'heap number * heap size' 
+                self.current_fd.seek(  heap_number * self.heap_size, os.SEEK_SET )
+                # change absolute requested spectrum number into relative, as in: relative to start of current heap!
+                self.start_spectrum -= self.current_file.begin_spectra + heap_number * nSpecPerHeap
+            return next(self)
+
+
 def read_beamformdata_impl(obs, readheaps = 10, specnum=None, verbose=False, raw=True):
     print("read_beamformdata/ before: dir(...)=",dir(read_beamformdata))
     # give this object extra attributes 
@@ -157,8 +224,8 @@ def read_beamformdata_impl(obs, readheaps = 10, specnum=None, verbose=False, raw
     #  DC frequency and bandwidth:
     #  For KAT7 frequency axis in the data goes down towards higher channel number (indicated here by neg. bandwidth)
     # DC edge is at index 0 but only the center frequency is in the obs. info
-    bandwidth                = -obs.bandwidth
-    dc_frequency             = obs.centre_freq - obs.bandwidth/2
+    bandwidth                = obs.bandwidth
+    dc_frequency             = obs.dc_freq
     # requested start spectrum will be "absolute spectrum number" on entry or if None => start from the beginning
     requested_start_spectrum = spectrum_number = obs.begin_spectra if specnum is None else specnum
     # Skip to the data file containing the requested spectrum
@@ -194,7 +261,8 @@ def read_beamformdata_old(obs, *args, **kwargs):
     rv.bandwidth = obs.bandwidth
     return rv
 
-read_beamformdata = ReadBeamformData
+read_beamformdata = ReadBeamformHeap #ReadBeamformData
 #freq_to_time      = sigproc.synthesizer_real( sigproc.replacer((0, 0+0j)), sigproc.auto_comb(40) )
-freq_to_time      = sigproc.synthesizer_real( sigproc.replacer((0, 0+0j)) )
+#freq_to_time      = sigproc.synthesizer_real( sigproc.replacer((0, 0+0j)) )
+freq_to_time      = sigproc.synthesizer_g_real_irfft_heap( sigproc.replacer_heap((0, 0+0j)) )
 ddc               = sigproc.dbbc

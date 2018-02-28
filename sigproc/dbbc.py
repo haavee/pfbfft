@@ -25,7 +25,7 @@ def dbbc(lo, sr_in, sr_out, window=None):
     if not (L.denominator==1 and M.denominator==1 and L<=10 and M<=200):
         raise RuntimeError(("DBBC/ sample rates sr_in={0}, sr_out={1} cannot be transformed 'simply' "+
                            "through upsample by L, downsample by M; L={2} M={3}").format(sr_in, sr_out, L, M))
-    sf = sigproc.util.rescale([0,lo], "Hz")
+    sf = sigproc.util.rescale([lo, 0] if lo < 0 else [0,lo] , "Hz")
     print("DBBC/lo={4}{5} sr_in={0} sr_out={1}, using sr_in * {2} / {3} = sr_out".format(sr_in, sr_out, L, M, lo/sf[0], sf[1]))
 
     # Make sure that L, M are back to normal integers
@@ -54,7 +54,8 @@ def dbbc(lo, sr_in, sr_out, window=None):
 
         # multiply by complex cosine exp( -j * 2 * pi * f * (t + t0))
         D("mixing ...")
-        mixed          = samples * numpy.exp( -2j * numpy.pi * lo * numpy.array((numpy.arange(len(samples))+State.nSamples)/sr_in, dtype=numpy.float) )
+        mixed  = samples * numpy.exp( -2j * numpy.pi * lo * ((numpy.arange(len(samples), dtype=numpy.float64)+State.nSamples)/numpy.float64(sr_in))  )
+        # keep remainder of samples withing sample rate [basically the phase offset for when the next chunk of time samples get in]
         State.nSamples = int( State.nSamples % sr_in )
         D("   len=",len(mixed)," dtype=",mixed.dtype)
 
@@ -77,8 +78,8 @@ def dbbc(lo, sr_in, sr_out, window=None):
         re      = SIGNAL.lfilter(coeffs_r,                 1, down.real)
         im      = SIGNAL.lfilter(coeffs_i,                 1, down.imag)
         # Now we have USB = re + im, LSB = re - im [apparently other way around????]
-        lsb     = re + im #down.real #re + im
-        usb     = re - im #down.imag #re - im
+        lsb     = re + im
+        usb     = re - im 
         return (lsb, usb)
     return do_it
 

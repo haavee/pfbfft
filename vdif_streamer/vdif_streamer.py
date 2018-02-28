@@ -54,27 +54,6 @@ class Data_Reader(object):
         self.data = numpy.hstack([self.data, self.read()])
         return self.data
 
-class QuantizeC(object):
-    """
-    uses precomiled C code to do the downsampling
-    """
-    def __init__(self, data_frame_size):
-        # memory buffer for quantized data
-        input_type = npct.ndpointer(dtype=np.double, ndim=1, flags='CONTIGUOUS')
-        output_type = c_ubyte * data_frame_size
-        self.lib = npct.load_library("libquantize", ".")
-        self.lib.quantize_samples.restype = None
-        self.lib.quantize_samples.argtypes = [input_type, output_type, c_int, c_double]
-        self.output_data = output_type()
-        
-    def do(self, input_data, threshold):
-        assert input_data.dtype == np.double
-        assert len(input_data) == len(self.output_data)*4
-        self.lib.quantize_samples(np.ascontiguousarray(input_data),
-                                  self.output_data,
-                                  c_int(len(input_data)),
-                                  c_double(threshold))
-        
 # VEX functions
 def parse_value(text, unit):
     value_unit = text.split()
@@ -195,15 +174,14 @@ if __name__ == "__main__":
     assert info1.centre_freq == info2.centre_freq
     if opts.DDC_freq is not None:
         ddc_freq = opts.DDC_freq
-    #lo_freq = (info1.centre_freq + info1.bandwidth/2 - (float(ddc_freq) * 1e6)) # MHz -> Hz
-    lo_freq = float(ddc_freq)*1e6 - (info1.centre_freq - info1.bandwidth/2)
+
+    # The mixing freq is the requested freq minus the dc freq
+    lo_freq = float(ddc_freq)*1e6 - info1.dc_freq 
 
     # compute the number of spectra per second and bail if it's not an integer number
-    #spectra_per_second, remainder = divmod(info1.bandwidth, info1.n_chans) #390625
-    #assert remainder==0
-    spectra_per_second = fractions.Fraction( info1.bandwidth/info1.n_chans )
-    assert spectra_per_second.denominator == 1, "Non-integer number of spectra per second"
-    spectra_per_second = spectra_per_second.numerator
+    assert info1.spectra_p_s == info2.spectra_p_s, "The number of spectra per second is not equal for the observations"
+    assert info1.spectra_p_s.denominator == 1    , "Non-integer number of spectra per second"
+    spectra_per_second = info1.spectra_p_s.numerator
     assert info1.sync_time == info2.sync_time
     if opts.start is not None:
         start = parse_vex_time(opts.start)
@@ -213,25 +191,17 @@ if __name__ == "__main__":
     data_frame_size = 8000
     bits_per_sample = 2
     samples_per_frame = data_frame_size * 8 // bits_per_sample  # Python3 makes this Float 
-    #assert int(samples_per_frame) == samples_per_frame
-    #samples_per_frame = int(samples_per_frame)
     assert int(output_sample_rate)== output_sample_rate
     vdif_frames_per_second = fractions.Fraction(int(output_sample_rate), samples_per_frame)
     assert vdif_frames_per_second.denominator == 1, "Not an integer number of VDIF frames per second"
     vdif_frames_per_second  = vdif_frames_per_second.numerator
 
-    #vdif_compatible_specnum = int(spectra_per_second / fractions.gcd(vdif_frames_per_second, spectra_per_second))
     vdif_compatible_specnum = spectra_per_second // fractions.gcd(vdif_frames_per_second, spectra_per_second)
         
     if start is None:
         # we must round to a spectra time stamp that is representable as a VDIF frame number
-        #round_to = spectra_per_second 
-        #round_to      = fractions.gcd(vdif_frames_per_second, spectra_per_second)
         start_specnum = max(info1.begin_spectra, info2.begin_spectra)
         # play it safe, round to a whole second
-        #start_specnum = (start_specnum + spectra_per_second - 1) / spectra_per_second * spectra_per_second
-        #start_specnum = ((start_specnum + round_to - 1) / round_to) * round_to
-        #start_specnum = int(((start_specnum + vdif_compatible_specnum - 1) / vdif_compatible_specnum) * vdif_compatible_specnum)
         start_specnum = ((start_specnum + vdif_compatible_specnum - 1) // vdif_compatible_specnum) * vdif_compatible_specnum
     else:
         start_specnum = (start - info1.sync_time) * spectra_per_second
@@ -239,12 +209,8 @@ if __name__ == "__main__":
 
     if end is None:
         # we must round to a spectra time stamp that is representable as a VDIF frame number
-        #round_to = spectra_per_second 
         end_specnum   = min(info1.end_spectra, info2.end_spectra)
         # play it safe, round to a whole second
-        #start_specnum = (start_specnum + spectra_per_second - 1) / spectra_per_second * spectra_per_second
-        #end_specnum   = ((end_specnum - round_to + 1) / round_to) * round_to
-        #end_specnum = int(end_specnum / vdif_compatible_specnum) * vdif_compatible_specnum
         end_specnum = (end_specnum // vdif_compatible_specnum) * vdif_compatible_specnum
     else:
         end_specnum = (end - info1.sync_time) * spectra_per_second
@@ -256,7 +222,6 @@ if __name__ == "__main__":
     start_framenr   = (sss - start_timestamp) * vdif_frames_per_second
     assert start_framenr.denominator == 1, "spectrum number {0} does not yield integer VDIF frame number".format(start_specnum)
     start_framenr = start_framenr.numerator
-    #assert start_timestamp == int(start_timestamp), "not an integer second start time"
 
     beam1 = beam_red.read_beamformdata(
         info1, specnum=start_specnum, end_specnum=end_specnum,
@@ -273,8 +238,6 @@ if __name__ == "__main__":
             header.seconds += 1
             header.frame_number = 0
 
-    #quantize = QuantizeC(data_frame_size)
-    
     start_datetime = datetime.utcfromtimestamp(int(start_timestamp))
     epoch = datetime(year=start_datetime.year,
                      month=(1 if start_datetime.month<7 else 7),
@@ -334,6 +297,11 @@ if __name__ == "__main__":
                 if opts.verbose:
                     print("writing", nFrame, "frames", " [nSample:", nSample,"used",min(reader1.size, reader2.size),"avail] [nBytes=",nBytes,"] dT=",time.time() - run_start)
                 # loop over lsb, usb per polarization, write out all frames
+                # tid      pol     sb   sb_vex
+                # 0        H       LSB   USB   [KAT7 data is LSB so this chunk is 'high end' of the spectrum, so USB wrt LO]
+                # 1        H       USB   LSB   [ ..          ..                   'low  end'    ...              LSB wrt LO]
+                # 2        V       LSB   USB
+                # 3        V       USB   LSB
                 thread = 0
                 for reader in [reader1, reader2]:
                     for sb in [0,1]:

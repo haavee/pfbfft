@@ -5,4 +5,5 @@ from sigproc.util               import *
 from sigproc.synthesizer_g_real import *
 from sigproc.hilbert            import *
 from sigproc.dbbc               import *
+from sigproc.synthesizer_g_real_irfft_heap import *
 
