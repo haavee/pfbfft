@@ -50,13 +50,14 @@ def dbbc(lo, sr_in, sr_out, window=None):
     def do_it(samples):
         # make sure samples is the real part of our complex
         D("making timeseries real ... n=",len(samples))
-        samples = numpy.array(numpy.real(samples), dtype=numpy.complex64)
+        samples  = numpy.array(numpy.real(samples), dtype=numpy.complex64)
+        nSamples = len(samples)
 
         # multiply by complex cosine exp( -j * 2 * pi * f * (t + t0))
         D("mixing ...")
-        mixed  = samples * numpy.exp( -2j * numpy.pi * lo * ((numpy.arange(len(samples), dtype=numpy.float64)+State.nSamples)/numpy.float64(sr_in))  )
+        mixed  = samples * numpy.exp( -2j * numpy.pi * lo * ((numpy.arange(nSamples, dtype=numpy.float64)+State.nSamples)/numpy.float64(sr_in))  )
         # keep remainder of samples withing sample rate [basically the phase offset for when the next chunk of time samples get in]
-        State.nSamples = int( State.nSamples % sr_in )
+        State.nSamples = int( (State.nSamples + nSamples) % sr_in )
         D("   len=",len(mixed)," dtype=",mixed.dtype)
 
         # append to previous samples

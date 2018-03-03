@@ -141,7 +141,7 @@ class ReadBeamformData(object):
             return self.read_heap()
 
 class ReadBeamformHeap(object):
-    def __init__(self, obs, readheaps = 20, specnum=None, end_specnum=None, verbose=False, raw=True):
+    def __init__(self, obs, readheaps = 50, specnum=None, end_specnum=None, verbose=False, raw=True):
         # give this object extra attributes 
         self.bandwidth                = obs.bandwidth
         self.n_heap                   = readheaps
