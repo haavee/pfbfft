@@ -545,9 +545,9 @@ def dbbc(lo, sr_in, sr_out, samples):
     # About time to plot some things
     f, plots = plt.subplots(nrows=4, ncols=1)
     D("plot samples ...")
-    plots[0].plot( samples )
+    plots[0].plot( samples[:min(len(samples), 8000)] )
     D("plot down ... len=",len(down))
-    plots[1].plot( down )
+    plots[1].plot( down[:min(len(down), 8000)] )
 
     # The plotting part
     ftsize = int(2*(userinput.ftsize//2)) 
@@ -598,7 +598,54 @@ def dbbc(lo, sr_in, sr_out, samples):
 
     return (lsb, usb)
 
+
+def requantize(ds):
+    ds = ((ds // (1.05*numpy.std(ds))).astype(numpy.int8).clip(-2, 1) + 2).reshape( len(ds)//4, 4 )
+    ds = numpy.sum((ds * [1, 4, 16, 64]).astype(numpy.int8), axis=1).astype(numpy.int8)
+    return ds
+
+from ctypes import LittleEndianStructure, c_uint32, c_uint8
+
+class VDIF_Header(LittleEndianStructure):
+    _pack_ = 1
+    _fields_ = [
+        # word 0
+        ("seconds", c_uint32, 30),
+        ("legacy", c_uint32, 1),
+        ("invalid", c_uint32, 1),
+
+        # word 1
+        ("frame_number", c_uint32, 24),
+        ("epoch", c_uint32, 6),
+        ("unassigned", c_uint32, 2),
+
+        # word 2
+        ("frame_length_8bytes", c_uint32, 24),
+        ("log2_channels", c_uint32, 5),
+        ("version", c_uint32, 3),
         
+        # word 3
+        ("station_id", c_uint32, 16),
+        ("thread_id", c_uint32, 10),
+        ("bits_per_sample_minus_1", c_uint32, 5),
+        ("complex", c_uint32, 1),
+
+        # extended header
+        ("word4", c_uint32),
+        ("word5", c_uint32),
+        ("word6", c_uint32),
+        ("word7", c_uint32)
+    ]
+def wr_vdif(samples, fn):
+    # write integral multiple of 8 # of samples 
+    n   = (len(samples)//8) * 8
+    # simple single header: one thread w/ 1 channel @ 2bits/sample
+    hdr = VDIF_Header(frame_length_8bytes=(n + 32)//8,
+                      bits_per_sample_minus1 = 1,
+                      log2_channels = 0)
+    with open(fn, "wb") as output:
+        output.write( hdr )
+        output.write( requantize(samples[:n]) )
 
 def blah(*args):
     # generate cosine/sine to mix with
@@ -1097,7 +1144,7 @@ def synthesizer_g_real_2_heap(bw, spectrum_src, **opts):
         plots[0].axvspan(userinput.lo/x_scale, (userinput.lo+userinput.bw)/x_scale, alpha=0.5, facecolor='r')
         plots[0].axvspan((userinput.lo-userinput.bw)/x_scale, userinput.lo/x_scale, alpha=0.5, facecolor='g')
     print("timeseries length = ",len(timeseries), " dtype = ",timeseries.dtype)
-    plots[1].plot(numpy.real(timeseries) )
+    plots[1].plot(numpy.real(timeseries)[:min(len(timeseries), 8000)] )
     summary(numpy.real(timeseries), "Re(timeseries)")
     summary(numpy.imag(timeseries), "Im(timeseries)")
 
