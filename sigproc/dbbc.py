@@ -6,7 +6,59 @@ import numpy, fractions, sigproc.util, sigproc.hilbert
 
 Hilbert45 = sigproc.hilbert.Hilbert45
 #D         = print if __debug__ else lambda *args: None 
-D         = lambda *args: None 
+#D         = lambda *args: None 
+D = print
+
+def requantize(ds):
+    ds = ((ds // (1.05*numpy.std(ds))).astype(numpy.int8).clip(-2, 1) + 2).reshape( len(ds)//4, 4 )
+    ds = numpy.sum((ds * [1, 4, 16, 64]).astype(numpy.int8), axis=1).astype(numpy.int8)
+    return ds
+
+from ctypes import LittleEndianStructure, c_uint32, c_uint8
+
+class VDIF_Header(LittleEndianStructure):
+    _pack_ = 1
+    _fields_ = [
+        # word 0
+        ("seconds", c_uint32, 30),
+        ("legacy", c_uint32, 1),
+        ("invalid", c_uint32, 1),
+
+        # word 1
+        ("frame_number", c_uint32, 24),
+        ("epoch", c_uint32, 6),
+        ("unassigned", c_uint32, 2),
+
+        # word 2
+        ("frame_length_8bytes", c_uint32, 24),
+        ("log2_channels", c_uint32, 5),
+        ("version", c_uint32, 3),
+        
+        # word 3
+        ("station_id", c_uint32, 16),
+        ("thread_id", c_uint32, 10),
+        ("bits_per_sample_minus_1", c_uint32, 5),
+        ("complex", c_uint32, 1),
+
+        # extended header
+        ("word4", c_uint32),
+        ("word5", c_uint32),
+        ("word6", c_uint32),
+        ("word7", c_uint32)
+    ]
+def wr_vdif(samples, fn):
+    # make sure we take a number of samples that is a multiple of 4 and 8
+    # (4 samples per byte (2 bits / sample), VDIF frame must be integer
+    #  number of 8-byte words)
+    # let's requantize 
+    quantized_packed  = requantize( samples[ : (len(samples)//32)*32 ] )
+    # simple single header: one thread w/ 1 channel @ 2bits/sample
+    hdr = VDIF_Header(frame_length_8bytes=(len(quantized_packed) + 32)//8,
+                      bits_per_sample_minus_1 = 1,
+                      log2_channels = 0)
+    with open(fn, "wb") as output:
+        output.write( hdr )
+        output.write( quantized_packed )
 
 
 # DBBC giving upper + lower sidebands around lo
@@ -46,6 +98,7 @@ def dbbc(lo, sr_in, sr_out, window=None):
     class State(object):
         nSamples     = 0   # keep track of phase within second; 0 <= nSamples < sr_in
         prev_samples = numpy.ndarray(0)
+        wrVDIF       = None
 #    @jit
     def do_it(samples):
         # make sure samples is the real part of our complex
@@ -54,7 +107,8 @@ def dbbc(lo, sr_in, sr_out, window=None):
         nSamples = len(samples)
 
         # multiply by complex cosine exp( -j * 2 * pi * f * (t + t0))
-        D("mixing ...")
+        frac = float(State.nSamples)/float(sr_in)
+        D("mixing ... phase = ", frac , " turns = ", frac * 2 * numpy.pi, " [State.nSamples=",State.nSamples,"]")
         mixed  = samples * numpy.exp( -2j * numpy.pi * lo * ((numpy.arange(nSamples, dtype=numpy.float64)+State.nSamples)/numpy.float64(sr_in))  )
         # keep remainder of samples withing sample rate [basically the phase offset for when the next chunk of time samples get in]
         State.nSamples = int( (State.nSamples + nSamples) % sr_in )
@@ -80,7 +134,12 @@ def dbbc(lo, sr_in, sr_out, window=None):
         im      = SIGNAL.lfilter(coeffs_i,                 1, down.imag)
         # Now we have USB = re + im, LSB = re - im [apparently other way around????]
         lsb     = re + im
-        usb     = re - im 
+        usb     = re - im
+        if State.wrVDIF is None:
+            print("Writing VDIF")
+            wr_vdif(lsb, "/tmp/lsb.vdif")
+            wr_vdif(usb, "/tmp/usb.vdif")
+            State.wrVDIF = True
         return (lsb, usb)
     return do_it
 

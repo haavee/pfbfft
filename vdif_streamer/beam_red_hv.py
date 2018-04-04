@@ -200,16 +200,20 @@ class ReadBeamformHeap(object):
             self.current_file  = next(self.file_list)
             self.current_fd    = open(self.current_file.file_name)
             self.current_nheap = self.current_file.file_size // self.heap_size
+            print("Start reading ",self.current_file.file_name)
             # If the requested start spectrum > 0 we're supposed to seek to a specific spectrum
             # but the files are blocked in "heaps" of 128 spectra so we must seek 
             # to the actual heap that contains the requested spectrum
             if self.start_spectrum>0:
+                print("   skipping to start spectrum=",self.start_spectrum, " file starts @",self.current_file.begin_spectra)
                 # compute heap number - we need it twice
                 heap_number = int((self.start_spectrum - self.current_file.begin_spectra)/nSpecPerHeap)
                 # seek to 'heap number * heap size' 
                 self.current_fd.seek(  heap_number * self.heap_size, os.SEEK_SET )
+                print("   seek to offset:", heap_number * self.heap_size)
                 # change absolute requested spectrum number into relative, as in: relative to start of current heap!
-                self.start_spectrum -= self.current_file.begin_spectra + heap_number * nSpecPerHeap
+                self.start_spectrum -= (self.current_file.begin_spectra + heap_number * nSpecPerHeap)
+                print("   which is in heap ",heap_number,", spectrum #",self.start_spectrum)
             return next(self)
 
 

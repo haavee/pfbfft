@@ -63,22 +63,38 @@ def rdbeamform_hv_avg(fn, quant):
     c = b.view(numpy.complex64)
     d = c.reshape(1, 1024, 128).transpose((0, 2, 1))
     #e = quant(d)
+    print "raw data shape=",d.shape
     e = quant(numpy.average(d, axis=1))
     f = numpy.average(quant(d), axis=1)
-    print "vector avg"
+    print "vector avg (shape=",e.shape,")"
     yield e[0,...]
-    print "scalar avg"
+    print "scalar avg (shape=",f.shape,")"
     yield f[0,...]
+
+
+def sum_it_impl(ar, quant):
+    # shape = (nheap, nspec, nchan)
+    # we sum over nspec
+    a2 = numpy.sum(quant(ar), axis=1)
+    # now shape = (nheap, nchan)
+    # we reorganize as:
+    # (nheap, 1, nchan)
+    a2.shape = ( (a2.shape[0], 1, a2.shape[1]) )
+    print "a2's shape = ",a2.shape
+    return a2
+
+sum_it = lambda quant: (lambda ar: sum_it_impl(ar, quant))
 
 #proc_file = lambda quant: lambda fn: map(draw_one, rdspec(fn, quant))
 #proc_file = lambda quant: lambda fn: map(draw_one, rdbeamform(fn, quant))
 #proc_file = lambda quant: lambda fn: map(draw_one, rdbeamform_nt(fn, quant))
-#proc_file = lambda quant: lambda fn: map(draw_one, rdbeamform_hv(fn, quant))
-proc_file = lambda quant: lambda fn: map(draw_one, rdbeamform_hv_avg(fn, quant))
+proc_file = lambda quant: lambda fn: map(draw_one, rdbeamform_hv(fn, quant))
+#proc_file = lambda quant: lambda fn: map(draw_one, rdbeamform_hv_avg(fn, quant))
 #ppgplot.pgopen("42/xw")
 #ppgplot.pgopen("/tmp/amplitude-1spectrum.ps/cps")
 #ppgplot.pgopen("/tmp/amplitude-1spectrum.png/png")
 ppgplot.pgopen("?")
 ppgplot.pgask(False)
-map(proc_file(numpy.abs), sys.argv[1:])
+#map(proc_file(numpy.abs), sys.argv[1:])
+map(proc_file(sum_it(numpy.abs)), sys.argv[1:])
 #map(proc_file(lambda x: numpy.angle(x, True)), sys.argv[1:])

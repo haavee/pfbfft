@@ -81,15 +81,18 @@ def rdbeamform_raw(fn):
                 print("Caught exception reading heap #",heapnum," - ",E)
                 raise StopIteration
 
-def rdbeamform_heap(fn, nheap=1):
+def rdbeamform_heap(fn, nheap=1, start_spectrum=0):
     # code for reading n heaps:
     #a = numpy.fromfile(fn, dtype=numpy.int8, count=1*1024*128*2)
     #b = a.astype(numpy.float32)
     #c = b.view(numpy.complex64)
     #d = c.reshape(1, 1024, 128).transpose((0, 2, 1))
     with open(fn) as infile:
-        # read one heap
-        heapnum = 0
+        # compute start of heap
+        heapnum        = start_spectrum // 128
+        start_spectrum = start_spectrum - (heapnum * 128)
+        infile.seek(heapnum * 128 * 2048)
+        print("rdbeamform_heap: file=",fn," start_spectrum=",start_spectrum," heap=",heapnum," seek to ",heapnum * 128 * 2048, " nheap=",nheap)
         while True:
             try:
                 yield Spectrum(numpy.fromfile(infile, dtype=numpy.int8, count=nheap*1024*128*2)\
@@ -98,8 +101,9 @@ def rdbeamform_heap(fn, nheap=1):
                                 .reshape((nheap, 1024,128))\
                                 .transpose((0, 2, 1))\
                                 .reshape((nheap * 128, 1024)),
-                                DCEdge=(1700.49e6 + 200e6), BW=-400e6)
-                heapnum = heapnum + 1
+                                DCEdge=(1700.49e6 + 200e6), BW=-400e6)[start_spectrum:]
+                start_spectrum = 0
+                heapnum        = heapnum + nheap
             except Exception as E:
                 print("Caught exception reading heap #",heapnum," - ",E)
                 raise StopIteration
@@ -636,7 +640,7 @@ class VDIF_Header(LittleEndianStructure):
         ("word6", c_uint32),
         ("word7", c_uint32)
     ]
-def wr_vdif(samples, fn):
+def wr_vdif_old(samples, fn):
     # write integral multiple of 8 # of samples 
     n   = (len(samples)//8) * 8
     # simple single header: one thread w/ 1 channel @ 2bits/sample
@@ -646,6 +650,20 @@ def wr_vdif(samples, fn):
     with open(fn, "wb") as output:
         output.write( hdr )
         output.write( requantize(samples[:n]) )
+
+def wr_vdif(samples, fn):
+    # make sure we take a number of samples that is a multiple of 4 and 8
+    # (4 samples per byte (2 bits / sample), VDIF frame must be integer
+    #  number of 8-byte words)
+    # let's requantize 
+    quantized_packed  = requantize( samples[ : (len(samples)//32)*32 ] )
+    # simple single header: one thread w/ 1 channel @ 2bits/sample
+    hdr = VDIF_Header(frame_length_8bytes=(len(quantized_packed) + 32)//8,
+                      bits_per_sample_minus_1 = 1,
+                      log2_channels = 0)
+    with open(fn, "wb") as output:
+        output.write( hdr )
+        output.write( quantized_packed )
 
 def blah(*args):
     # generate cosine/sine to mix with
