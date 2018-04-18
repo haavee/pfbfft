@@ -139,7 +139,7 @@ def read_beamformdata(info,readheaps = 10,specnum=-1,verbose=False,raw=True):
 import scipy.signal as signal
 
 def freq_to_time(dataspec):
-    N=2048
+    N=8192 #N=2048
     P=4 
     def sinc(x):
         tmp = np.sin(np.pi*x)/(np.pi*x)
@@ -212,10 +212,10 @@ def ddc(input_data , lo_freq, bandwidth):
     #### PARAMETERS
 
     # Input sample rate, fs
-    sample_rate = 800e6
+    sample_rate = 1712e6 #800e6
     no_samples = input_data.shape[0]#8192
     # Input tone frequency
-    tone_freq = 254e6
+    tone_freq = 711.49e6 #254e6
     # LO frequency used in mixing
     lo_freq = lo_freq#lo_freq
     # Interpolate by factor L and decimate by factor M
@@ -229,7 +229,8 @@ def ddc(input_data , lo_freq, bandwidth):
     L, M, n0, n1 = {32: (2, 25, 12, 1),
                     64: (4, 25, 31, 5),
                     128: (8, 25, 28, 9)}[bandwidth]
-
+    # MeerKAT 1712Msamp/s * 8 / 107 == 128Msamp/s == 64MHz
+    L, M, n0, n1  = 8, 107, 40, 3
     # Filter parameters (operating at a sample rate of L * fs)
     taps = 128
     cutoff = 64e6

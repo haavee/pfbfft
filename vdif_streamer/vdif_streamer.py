@@ -1,21 +1,25 @@
 #!/usr/bin/env python
+# this HAS to happen first
 from __future__ import print_function
-
+# and next we MUST do this before we include anything else to make sure all time
+# handling is done in GMT
+import os, time
+os.environ['TZ'] = ''
+time.tzset()
+# Right. NOW we can move on with our lives
 from vdif_header import VDIF_Header
-import beam_red_hv as beam_red
+import beam_red_meerkat as beam_red
 
 import numpy 
 import numpy.ctypeslib as npct
 
-import argparse
+import argparse, math, calendar, fractions, collections, re
 from datetime import datetime
 from ctypes import c_ubyte, c_int, c_double
-import os
-import time
-import calendar
-import fractions
-import collections
 #from numba import jit
+
+stripper = re.compile(r'^[0-9]*').sub
+asvex    = lambda ts, precision=5: "{tm:%Yy%jd%Hh%Mm%S}{ss}s".format(tm=datetime.fromtimestamp(float(ts)), ss=stripper("", "{0:0.{precision}f}".format(float(ts), precision=precision)))
 
 #@jit
 def requantize(ds):
@@ -25,12 +29,13 @@ def requantize(ds):
 
 run_start = time.time()
 class Data_Reader(object):
-    def __init__(self, beamformed, lo_freq, bandwidth):
+    def __init__(self, beamformed, lo_freq, bandwidth, sample_offset=0):
         self.beamformed = beamformed
         self.lo_freq    = lo_freq
         self.bandwidth  = bandwidth
+        self.skip_samps = sample_offset
         self.ddc        = beam_red.ddc(lo_freq, abs(self.beamformed.bandwidth*2), abs(self.bandwidth*2))
-        # start with empty 2 by 0 ndarray; we always get lst, usb from 1 lo
+        # start with empty 2 by 0 ndarray; we always get lsb, usb from 1 lo
         self.data       = numpy.ndarray((2,0)) #self.read()
 
     @property
@@ -42,9 +47,20 @@ class Data_Reader(object):
 
     def read(self):
         # stay here until the DDC has released at least one chunk of time series
+        time_data = numpy.ndarray((0))
         while True:
             spectral_data = next(self.beamformed)
-            time_data     = beam_red.freq_to_time(spectral_data)
+            time_data     = numpy.hstack([time_data, beam_red.freq_to_time(spectral_data)])
+            # make sure we have more samples than we need to skip before we skip
+            if len(time_data)<self.skip_samps:
+                continue
+            # skip samples, but only do that once
+            if self.skip_samps:
+                print("DataReader/seek to start sample ",self.skip_samps)
+                time_data       = time_data[self.skip_samps:]
+                self.skip_samps = 0
+            # Now we can send it onwards to the DDC and wait for
+            # it to release a chunk
             filtered_data = self.ddc(time_data)
             if filtered_data is not None:
                 return filtered_data
@@ -168,10 +184,11 @@ if __name__ == "__main__":
 
     if opts.sample_rate is not None:
         output_sample_rate = opts.sample_rate * 1e6
+    assert int(output_sample_rate) == output_sample_rate, "Requested output sample rate is not integer"
     
     info1 = beam_red.Observation(opts.data_dir1)
     info2 = beam_red.Observation(opts.data_dir2)
-    assert info1.centre_freq == info2.centre_freq
+    assert info1.centre_freq == info2.centre_freq, "The observations' centre frequency does not match"
     if opts.DDC_freq is not None:
         ddc_freq = opts.DDC_freq
 
@@ -180,55 +197,81 @@ if __name__ == "__main__":
 
     # compute the number of spectra per second and bail if it's not an integer number
     assert info1.spectra_p_s == info2.spectra_p_s, "The number of spectra per second is not equal for the observations"
-    assert info1.spectra_p_s.denominator == 1    , "Non-integer number of spectra per second"
-    spectra_per_second = info1.spectra_p_s.numerator
+    spectra_per_second = info1.spectra_p_s
     assert info1.sync_time == info2.sync_time
     if opts.start is not None:
         start = parse_vex_time(opts.start)
     if opts.end is not None:
         end = parse_vex_time(opts.end)
 
-    data_frame_size = 8000
-    bits_per_sample = 2
-    samples_per_frame = data_frame_size * 8 // bits_per_sample  # Python3 makes this Float 
-    assert int(output_sample_rate)== output_sample_rate
+    data_frame_size        = 4000
+    bits_per_sample        = 2
+    samples_per_frame      = data_frame_size * 8 // bits_per_sample  # Python3 makes this Float 
     vdif_frames_per_second = fractions.Fraction(int(output_sample_rate), samples_per_frame)
+    frameperiod            = 1/vdif_frames_per_second
     assert vdif_frames_per_second.denominator == 1, "Not an integer number of VDIF frames per second"
-    vdif_frames_per_second  = vdif_frames_per_second.numerator
+    print(" VDIF frame period: ", frameperiod)
 
-    vdif_compatible_specnum = spectra_per_second // fractions.gcd(vdif_frames_per_second, spectra_per_second)
-        
+    # if no start time given, take it from the observation that started last
+    # note that from here on we convert the start time to seconds since syncing
     if start is None:
-        # we must round to a spectra time stamp that is representable as a VDIF frame number
-        start_specnum = max(info1.begin_spectra, info2.begin_spectra)
-        # play it safe, round to a whole second
-        start_specnum = ((start_specnum + vdif_compatible_specnum - 1) // vdif_compatible_specnum) * vdif_compatible_specnum
+        start = info1.seconds_since_sync( max(info1.begin_spectra, info2.begin_spectra) )
     else:
-        start_specnum = (start - info1.sync_time) * spectra_per_second
-        assert (start_specnum >= info1.begin_spectra and start_specnum >= info2.begin_spectra), "start specnum: {ss}, begin spectra1: {bs1}, begin_spectra2: {bs2}".format(ss=start_specnum, bs1=info1.begin_spectra, bs2=info2.begin_spectra)
+        # info1.sync_time == info2.sync_time (asserted above) so we can Just Do This(tm)
+        start -= info1.sync_time
 
+    # we must round the start time to a spectra time stamp that is representable as a VDIF frame number
+    # Note: we have asserted before that both sync_time + spectra_per_second are
+    #       identical between info1 and info2. Thus we only need to convert the
+    #       requested time stamp to spectrum number once.
+    vdif_compat_start = frameperiod * ((start // frameperiod) + 1)
+    # specnum_from_time() will return tuple( integer-spectrum-number, sample-offset-within-timeseries-from-spectrum )
+    # so basically indicating at which sample to start exactly
+    start_specnum     = info1.specnum_from_time(vdif_compat_start)
+    # Because we cannot guarantee that both observations actually start/end with the same spectra we must validate
+    assert info1.begin_spectra <= start_specnum[0] < info1.end_spectra, \
+            "Requested start time out of bounds of datafile 1: {0} <= {1} < {2}".format(info1.begin_spectra, start_specnum[0], info1.end_spectra)
+    assert info2.begin_spectra <= start_specnum[0] < info2.end_spectra, \
+            "Requested start time out of bounds of datafile 2: {0} <= {1} < {2}".format(info2.begin_spectra, start_specnum[0], info2.end_spectra)
+
+    # Repeat for the end time (only use the observation that finished first ...)
     if end is None:
-        # we must round to a spectra time stamp that is representable as a VDIF frame number
-        end_specnum   = min(info1.end_spectra, info2.end_spectra)
-        # play it safe, round to a whole second
-        end_specnum = (end_specnum // vdif_compatible_specnum) * vdif_compatible_specnum
+        end = info1.seconds_since_sync( min(info1.end_spectra, info2.end_spectra) )
     else:
-        end_specnum = (end - info1.sync_time) * spectra_per_second
-        assert (end_specnum <= info1.end_spectra and end_specnum <= info2.end_spectra), "end specnum: {ss}, end spectra1: {bs1}, end_spectra2: {bs2}".format(ss=end_specnum, bs1=info1.end_spectra, bs2=info2.end_spectra)
+        end -= info1.sync_time
 
-    sss             = info1.seconds_since_sync(start_specnum)
-    start_timestamp = int(sss)
-    # split into integer time and fractional second
-    start_framenr   = (sss - start_timestamp) * vdif_frames_per_second
-    assert start_framenr.denominator == 1, "spectrum number {0} does not yield integer VDIF frame number".format(start_specnum)
-    start_framenr = start_framenr.numerator
+    vdif_compat_end = frameperiod * (end // frameperiod)
+    end_specnum     = info1.specnum_from_time(vdif_compat_end)
+    assert info1.begin_spectra < end_specnum[0] <= info1.end_spectra, \
+            "Requested end time out of bounds of datafile 1: {0} < {1} <= {2}".format(info1.begin_spectra, end_specnum[0], info1.end_spectra)
+    assert info2.begin_spectra < end_specnum[0] <= info2.end_spectra, \
+            "Requested end time out of bounds of datafile 2: {0} < {1} <= {2}".format(info2.begin_spectra, end_specnum[0], info2.end_spectra)
 
+    print(" decided on start_specnum=", start_specnum)
+    print("       => ", asvex(vdif_compat_start+info1.sync_time) )
+    print(" decided on end_specnum=", end_specnum)
+    print("       => ", asvex(vdif_compat_end+info1.sync_time) )
+
+    # Need to get VDIF integer second + vdif start frame number
+    # vdif_compat_start still with respect to sync time, does not matter for framenr within second
+    start_timestamp = int(vdif_compat_start)
+    start_framenr   = (vdif_compat_start - start_timestamp)/frameperiod
+    assert start_framenr.denominator == 1, \
+            "VDIF compat start {0} does not yield integer VDIF frame number?!".format(asvex(vdif_compat_start + info1.sync_time))
+    start_framenr   = start_framenr.numerator
+    # But now we must really convert back to full time stamp
+    start_timestamp += info1.sync_time
+    end             += info1.sync_time
+    print(" Start UNIX time stamp   = ", asvex(start_timestamp))
+    print(" Start VDIF frame number = ", start_framenr)
+
+    # The start/end spectra numbers can be propagated to the beamform readers
     beam1 = beam_red.read_beamformdata(
-        info1, specnum=start_specnum, end_specnum=end_specnum,
-        verbose=opts.verbose, raw=False)
+        info1, specnum=start_specnum[0], end_specnum=end_specnum[0],
+        verbose=opts.verbose, raw=False, readheaps=1024)
     beam2 = beam_red.read_beamformdata(
-        info2, specnum=start_specnum, end_specnum=end_specnum,
-        verbose=opts.verbose,raw=False)
+        info2, specnum=start_specnum[0], end_specnum=end_specnum[0],
+        verbose=opts.verbose,raw=False, readheaps=1024)
 
     data1 = None
     data2 = None
@@ -250,6 +293,7 @@ if __name__ == "__main__":
     if end is not None:
         end_seconds_in_epoch = (datetime.utcfromtimestamp(end) - epoch).total_seconds()
 
+    print("EPOCH: ",epoch.isoformat(),"  => sse=", seconds_since_epoch, " end_seconds_in_epoch=", end_seconds_in_epoch)
     def mk_header(thread):
         return VDIF_Header(seconds=int(seconds_since_epoch),
                            epoch=epoch_number,
@@ -272,10 +316,11 @@ if __name__ == "__main__":
             # multiplier values to "bit shift" 4 sample values to their position within byte
             #sample_scales = numpy.array([1, 4, 16, 64])
             # assume Nyquist sampling
-            #bandwidth   = int(round(output_sample_rate / 2e6))
             bandwidth   = output_sample_rate // 2#e6
-            reader1     = Data_Reader(beam1, lo_freq, bandwidth)
-            reader2     = Data_Reader(beam2, lo_freq, bandwidth)
+            # The data readers must be informed about how many samples to initially skip 
+            # to end up at the sample to actually start working with!
+            reader1     = Data_Reader(beam1, lo_freq, bandwidth, sample_offset=start_specnum[1])
+            reader2     = Data_Reader(beam2, lo_freq, bandwidth, sample_offset=start_specnum[1])
             threadState = dict()
             endSecond   = -1
             while True:

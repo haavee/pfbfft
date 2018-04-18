@@ -6,8 +6,8 @@ import numpy, fractions, sigproc.util, sigproc.hilbert
 
 Hilbert45 = sigproc.hilbert.Hilbert45
 #D         = print if __debug__ else lambda *args: None 
-#D         = lambda *args: None 
-D = print
+D         = lambda *args: None 
+#D = print
 
 def requantize(ds):
     ds = ((ds // (1.05*numpy.std(ds))).astype(numpy.int8).clip(-2, 1) + 2).reshape( len(ds)//4, 4 )
@@ -74,7 +74,7 @@ def dbbc(lo, sr_in, sr_out, window=None):
     # prevent ludicrous ratios - if L>>10 that would mean
     # that, realistically, L and M are not very compatible
     # [800 and 64 should give 25 and 2 which is 'acceptable']
-    if not (L.denominator==1 and M.denominator==1 and L<=10 and M<=200):
+    if not (L.denominator==1 and M.denominator==1 and L<=10 and M<=300):
         raise RuntimeError(("DBBC/ sample rates sr_in={0}, sr_out={1} cannot be transformed 'simply' "+
                            "through upsample by L, downsample by M; L={2} M={3}").format(sr_in, sr_out, L, M))
     sf = sigproc.util.rescale([lo, 0] if lo < 0 else [0,lo] , "Hz")
@@ -99,7 +99,7 @@ def dbbc(lo, sr_in, sr_out, window=None):
         nSamples     = 0   # keep track of phase within second; 0 <= nSamples < sr_in
         prev_samples = numpy.ndarray(0)
         wrVDIF       = None
-#    @jit
+
     def do_it(samples):
         # make sure samples is the real part of our complex
         D("making timeseries real ... n=",len(samples))
@@ -135,11 +135,11 @@ def dbbc(lo, sr_in, sr_out, window=None):
         # Now we have USB = re + im, LSB = re - im [apparently other way around????]
         lsb     = re + im
         usb     = re - im
-        if State.wrVDIF is None:
-            print("Writing VDIF")
-            wr_vdif(lsb, "/tmp/lsb.vdif")
-            wr_vdif(usb, "/tmp/usb.vdif")
-            State.wrVDIF = True
+#        if State.wrVDIF is None:
+#            print("Writing VDIF")
+#            wr_vdif(lsb, "/tmp/lsb.vdif")
+#            wr_vdif(usb, "/tmp/usb.vdif")
+#            State.wrVDIF = True
         return (lsb, usb)
     return do_it
 

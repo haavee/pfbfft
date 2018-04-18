@@ -81,6 +81,29 @@ def rdbeamform_raw(fn):
                 print("Caught exception reading heap #",heapnum," - ",E)
                 raise StopIteration
 
+def rdbeamform_meerkat(fn, nspec=128, start_spectrum=0):
+    # meerkat beamform is in HDF5
+    import h5py, pickle
+    with h5py.File(fn, 'r') as infile:
+        data        = infile['Data']['bf_raw']
+        tel_state   = infile['TelescopeState']
+        bandwidth   = pickle.loads(tel_state.attrs['i0_bandwidth'])
+        centre_freq = pickle.loads(tel_state.attrs['sdp_l0_center_freq'])
+        dc_freq     = centre_freq - bandwidth/2.0
+        print("rdbeamform_meerkat: file=",fn," start_spectrum=",start_spectrum,"  nspec=",nspec, " data.shape=",data.shape)
+        while True:
+            try:
+                yield Spectrum( data[:,start_spectrum:start_spectrum+nspec,:]
+                            .astype(numpy.float32)\
+                            .view(numpy.complex64)\
+                            .squeeze()\
+                            .T,\
+                            DCEdge=0, DCFrequency=dc_freq, BW=bandwidth)
+                start_spectrum += nspec
+            except Exception as E:
+                print("Caught exception reading spectrum #",start_spectrum," - ",E)
+                raise StopIteration
+
 def rdbeamform_heap(fn, nheap=1, start_spectrum=0):
     # code for reading n heaps:
     #a = numpy.fromfile(fn, dtype=numpy.int8, count=1*1024*128*2)
@@ -511,6 +534,7 @@ def dbbc(lo, sr_in, sr_out, samples):
         raise RuntimeError(("DBBC/ sample rates sr_in={0}, sr_out={1} cannot be transformed 'simply' "+
                            "through upsample by L, downsample by M; L={2} M={3}").format(sr_in, sr_out, L, M))
     print("DBBC/sr_in={0} sr_out={1}, using sr_in * {2} / {3} = sr_out".format(sr_in, sr_out, L, M))
+    print("     LO=",lo)
 
     # Make sure that L, M are back to normal integers
     L = L.numerator
@@ -527,12 +551,13 @@ def dbbc(lo, sr_in, sr_out, samples):
 
     #down    = SIGNAL.resample_poly(mixed, L, M, window=('kaiser', 6.76))
     #coeffs  = SIGNAL.firwin(129, float(sr_out/sr_in)/2, window=userinput.window)
-    D("resampling *",L,"/",M," [window=",userinput.window,"]")
-    down    = SIGNAL.resample_poly(mixed, L, M, window=userinput.window)
+    #D("resampling *",L,"/",M," [window=",userinput.window,"]")
+    down    = SIGNAL.resample_poly(mixed, L, M, window=('kaiser', 14))
+    #down    = SIGNAL.resample_poly(mixed, L, M, window=userinput.window)
     D("   len=",len(down)," dtype=",down.dtype)
 
-    coeffs_r= hilbert.Hilbert45(301, 0.05, 0.05, 0.45, 0)
-    coeffs_i= hilbert.Hilbert45(301, 0.05, 0.05, 0.45, 1)
+    coeffs_r= hilbert.Hilbert45(501, 0.05, 0.05, 0.45, 0)
+    coeffs_i= hilbert.Hilbert45(501, 0.05, 0.05, 0.45, 1)
     re      = SIGNAL.lfilter(coeffs_r,                 1, down.real)
     im      = SIGNAL.lfilter(coeffs_i,                 1, down.imag)
 
@@ -542,12 +567,159 @@ def dbbc(lo, sr_in, sr_out, samples):
     summary(im, "Im(hilb)")
 
     D("making USB ...")
-    usb     = re - im 
+    usb     = re - im #re + im 
     D("making LSB ...")
-    lsb     = re + im
+    lsb     = re + im #re - im
 
     # About time to plot some things
     f, plots = plt.subplots(nrows=4, ncols=1)
+    #f, plots = plt.subplots(nrows=3, ncols=1)
+    plt.title("dbbc/resample_poly")
+    D("plot samples ...")
+    plots[0].plot( samples[:min(len(samples), 8000)] )
+    D("plot down ... len=",len(down))
+    plots[1].plot( down[:min(len(down), 8000)] )
+
+    # The plotting part
+    ftsize = int(2*(userinput.ftsize//2)) 
+    nfft   = int(len(lsb)//ftsize)
+    D("ftsize=",ftsize," nfft=",nfft)
+
+    # Do the USB
+    D("FFT usb/ len=",len(usb), " using ",ftsize*nfft)
+    spectra = numpy.fft.fft(usb[:(ftsize * nfft)].reshape((nfft, ftsize)), axis=1)
+    D("    spectra.shape=",spectra.shape)
+    usb_freq = numpy.sum(numpy.abs(spectra), axis=0)[:ftsize//2]
+    usb_pha  = numpy.angle(numpy.mean(spectra, axis=0)[:ftsize//2], deg=True)
+
+    if lo<0:
+        x_axis_u          = numpy.linspace(lo+(sr_out/2), lo, ftsize//2)
+    else:
+        x_axis_u          = numpy.linspace(lo, (lo+sr_out/2), ftsize//2)
+    (u_scale, u_unit) = rescale(x_axis_u, "Hz")
+
+    #plots[2].set_xlim(x_axis_u[0]/u_scale, x_axis_u[-1]/u_scale)
+    plots[2].set_xlim( (lo - sr_out/2 - sr_out/10)/u_scale, (lo + sr_out/2 + sr_out/10)/u_scale ) 
+    plots[2].plot( x_axis_u/u_scale, usb_freq, 'r', alpha=0.5 )
+    plots[3].plot( x_axis_u/u_scale, usb_pha , 'r.', alpha=0.5 )
+    plots[2].set_xlabel(u_unit)
+    #plots[2].set_title("FFT/USB")
+    plots[2].set_title("FFT")
+
+    # Repeat for LSB
+    D("FFT lsb/ len=",len(lsb), " using ",ftsize*nfft)
+    spectra  = numpy.fft.fft(lsb[:(ftsize * nfft)].reshape((nfft, ftsize)), axis=1)
+    lsb_freq = numpy.sum(numpy.abs(spectra), axis=0)[:ftsize//2]
+    lsb_pha  = numpy.angle(numpy.mean(spectra, axis=0)[:ftsize//2], deg=True)
+
+    if lo<0:
+        x_axis_l          = numpy.linspace(lo, lo-(sr_out/2), ftsize//2)
+    else:
+        x_axis_l          = numpy.linspace(lo-(sr_out/2), lo, ftsize//2)
+    (l_scale, l_unit) = rescale(x_axis_l, "Hz")
+
+    #plots[3].set_xlim(x_axis_l[0]/l_scale, x_axis_l[-1]/l_scale)
+    #plots[3].plot( x_axis_l/l_scale, lsb_freq, 'g', alpha=0.5 )
+    plots[2].plot( x_axis_l/u_scale, lsb_freq, 'g', alpha=0.5 )
+    plots[3].plot( x_axis_l/u_scale, lsb_pha , 'g.', alpha=0.5 )
+    #plots[3].set_xlabel(l_unit)
+    #plots[3].set_title("FFT/LSB")
+
+    # Do loox0ring for peaks in USB/LSB
+    limit = userinput.peak_threshold
+    plots[2].axhline( limit*numpy.max(usb_freq) )
+    for p in idx_peakert(usb_freq, limit):
+        print("Found peak in USB: f={0:.8f}Hz [bin={1}]".format( x_axis_u[p], p))
+        plots[2].plot( x_axis_u[p]/u_scale, usb_freq[p], marker='v', color='r')
+    #plots[3].axhline( limit*numpy.max(lsb_freq) )
+    for p in idx_peakert(lsb_freq, limit):
+        print("Found peak in LSB: f={0:.8f}Hz [bin={1}]".format( x_axis_l[p], p))
+        #plots[3].plot( x_axis_l[p]/l_scale, lsb_freq[p], marker='v', color='g')
+        plots[2].plot( x_axis_l[p]/l_scale, lsb_freq[p], marker='v', color='g')
+
+    return (lsb, usb)
+
+def dbbc_oldstyle(lo, sr_in, sr_out, samples):
+    import scipy.signal as SIGNAL
+    import scipy.fftpack as FFT
+    import matplotlib.pyplot as plt
+
+    # make sure sr_in/sr_out are Fractions
+    sr_in, sr_out = list(map(fractions.Fraction, [sr_in, sr_out]))
+    # Get L, M
+    mult  = lcm_f(sr_in, sr_out)
+    L     = mult / sr_in
+    M     = mult / sr_out
+    # Assert that both L and M are integer, not fractions.
+    # prevent ludicrous ratios - if L>>10 that would mean
+    # that, realistically, L and M are not very compatible
+    # [800 and 64 should give 25 and 2 which is 'acceptable']
+    if not (L.denominator==1 and M.denominator==1 and L<=10 and M<=200):
+        raise RuntimeError(("DBBC/ sample rates sr_in={0}, sr_out={1} cannot be transformed 'simply' "+
+                           "through upsample by L, downsample by M; L={2} M={3}").format(sr_in, sr_out, L, M))
+    print("DBBC/sr_in={0} sr_out={1}, using sr_in * {2} / {3} = sr_out".format(sr_in, sr_out, L, M))
+    print("     LO=",lo)
+
+    # Make sure that L, M are back to normal integers
+    L = L.numerator
+    M = M.numerator
+
+    # make sure samples is the real part of our complex
+    D("making timeseries real ... n=",len(samples))
+    samples = numpy.array(numpy.real(samples), dtype=numpy.complex64)
+    mixed   = numpy.zeros(len(samples) * L, dtype=numpy.complex128)
+    # multiply by complex cosine exp( -j * 2 * pi * f * t)
+    D("mixing ... samples.dtype=",samples.dtype)
+    mixed[::L]  = samples * numpy.exp( -2j * numpy.pi * lo * (numpy.arange(len(samples), dtype=numpy.float64)/numpy.float64(sr_in))  )
+    #mixed  = samples * numpy.exp( -2j * numpy.pi * lo * (numpy.arange(len(samples), dtype=numpy.float64)/numpy.float64(sr_in))  )
+    D("   len=",len(mixed)," dtype=",mixed.dtype)
+
+    # windowing + FIR
+    # make it symmetric + odd
+    #win      = SIGNAL.kaiser(51, beta=14)
+    win      = 'hamming' #('kaiser', 14)
+    # the filter: cutoff at sr_out/sr_in (say 8MHz out of 400MHz -> cutoff = 8/400
+    #fir      = SIGNAL.firwin(501, cutoff=sr_out*L, window=win, nyq=sr_in)
+    #fir      = SIGNAL.firwin(501, cutoff=float(M*sr_out)/(L*sr_in), window=win, nyq=float(L*sr_in))
+    #fir      = SIGNAL.firwin(501, cutoff=float(60*sr_out)/sr_in, nyq=float(sr_in))
+    #fir      = SIGNAL.firwin(501, cutoff=0.00934, nyq=1.0)
+    fir      = SIGNAL.firwin(501, cutoff=float(sr_out)/float(sr_in), window='hamming', nyq=1.0)
+
+    # mixed was already upsampled, now filter it
+    #zi            = SIGNAL.lfilter_zi(fir, [1.0])
+    #(filtered,zf) = SIGNAL.lfilter(fir, [1.0], mixed, zi=zi)
+    filtered      = SIGNAL.lfilter(fir, [1.0], mixed)
+
+
+    D("resampling *",L,"/",M," [window=",win,"]")
+    down          = filtered[::M]
+    D("   len=",len(down)," dtype=",down.dtype)
+
+    #down    = SIGNAL.resample_poly(mixed, L, M, window=('kaiser', 6.76))
+    #coeffs  = SIGNAL.firwin(129, float(sr_out/sr_in)/2, window=userinput.window)
+    #D("resampling *",L,"/",M," [window=",userinput.window,"]")
+    #down    = SIGNAL.resample_poly(mixed, L, M, window=userinput.window)
+    #D("   len=",len(down)," dtype=",down.dtype)
+
+    coeffs_r= hilbert.Hilbert45(501, 0.05, 0.05, 0.45, 0)
+    coeffs_i= hilbert.Hilbert45(501, 0.05, 0.05, 0.45, 1)
+    re      = SIGNAL.lfilter(coeffs_r,                 1, down.real)
+    im      = SIGNAL.lfilter(coeffs_i,                 1, down.imag)
+
+    summary(down.real, "Re(down)")
+    summary(down.imag, "Im(down)")
+    summary(re, "Re(hilb)")
+    summary(im, "Im(hilb)")
+
+    D("making USB ...")
+    usb     = re - im #re + im 
+    D("making LSB ...")
+    lsb     = re + im #re - im
+
+    # About time to plot some things
+    f, plots = plt.subplots(nrows=4, ncols=1)
+    #f, plots = plt.subplots(nrows=3, ncols=1)
+    plt.title("dbbc/manual (i.e. [::L]=mixed, down=[::M])")
     D("plot samples ...")
     plots[0].plot( samples[:min(len(samples), 8000)] )
     D("plot down ... len=",len(down))
@@ -562,6 +734,7 @@ def dbbc(lo, sr_in, sr_out, samples):
     D("FFT usb/ len=",len(usb), " using ",ftsize*nfft)
     spectra = numpy.fft.fft(usb[:(ftsize * nfft)].reshape((nfft, ftsize)), axis=1)
     usb_freq = numpy.sum(numpy.abs(spectra), axis=0)[:ftsize//2]
+    usb_pha  = numpy.angle(numpy.mean(spectra, axis=0)[:ftsize//2], deg=True)
 
     if lo<0:
         x_axis_u          = numpy.linspace(lo+(sr_out/2), lo, ftsize//2)
@@ -569,15 +742,19 @@ def dbbc(lo, sr_in, sr_out, samples):
         x_axis_u          = numpy.linspace(lo, (lo+sr_out/2), ftsize//2)
     (u_scale, u_unit) = rescale(x_axis_u, "Hz")
 
-    plots[2].set_xlim(x_axis_u[0]/u_scale, x_axis_u[-1]/u_scale)
+    #plots[2].set_xlim(x_axis_u[0]/u_scale, x_axis_u[-1]/u_scale)
+    plots[2].set_xlim( (lo - sr_out/2 - sr_out/10)/u_scale, (lo + sr_out/2 + sr_out/10)/u_scale ) 
     plots[2].plot( x_axis_u/u_scale, usb_freq, 'r', alpha=0.5 )
+    plots[3].plot( x_axis_u/u_scale, usb_pha , 'r.', alpha=0.5 )
     plots[2].set_xlabel(u_unit)
-    plots[2].set_title("FFT/USB")
+    #plots[2].set_title("FFT/USB")
+    plots[2].set_title("FFT")
 
     # Repeat for LSB
-    D("FFT usb/ len=",len(lsb), " using ",ftsize*nfft)
+    D("FFT lsb/ len=",len(lsb), " using ",ftsize*nfft)
     spectra  = numpy.fft.fft(lsb[:(ftsize * nfft)].reshape((nfft, ftsize)), axis=1)
     lsb_freq = numpy.sum(numpy.abs(spectra), axis=0)[:ftsize//2]
+    lsb_pha  = numpy.angle(numpy.mean(spectra, axis=0)[:ftsize//2], deg=True)
 
     if lo<0:
         x_axis_l          = numpy.linspace(lo, lo-(sr_out/2), ftsize//2)
@@ -585,23 +762,26 @@ def dbbc(lo, sr_in, sr_out, samples):
         x_axis_l          = numpy.linspace(lo-(sr_out/2), lo, ftsize//2)
     (l_scale, l_unit) = rescale(x_axis_l, "Hz")
 
-    plots[3].set_xlim(x_axis_l[0]/l_scale, x_axis_l[-1]/l_scale)
-    plots[3].plot( x_axis_l/l_scale, lsb_freq, 'g', alpha=0.5 )
-    plots[3].set_xlabel(l_unit)
-    plots[3].set_title("FFT/LSB")
+    #plots[3].set_xlim(x_axis_l[0]/l_scale, x_axis_l[-1]/l_scale)
+    #plots[3].plot( x_axis_l/l_scale, lsb_freq, 'g', alpha=0.5 )
+    plots[2].plot( x_axis_l/u_scale, lsb_freq, 'g', alpha=0.5 )
+    plots[3].plot( x_axis_l/u_scale, lsb_pha , 'g.', alpha=0.5 )
+    #plots[3].set_xlabel(l_unit)
+    #plots[3].set_title("FFT/LSB")
 
     # Do loox0ring for peaks in USB/LSB
-    plots[2].axhline( 0.9*numpy.max(usb_freq) )
-    for p in idx_peakert(usb_freq, 0.9):
+    limit = userinput.peak_threshold
+    plots[2].axhline( limit*numpy.max(usb_freq) )
+    for p in idx_peakert(usb_freq, limit):
         print("Found peak in USB: f={0:.8f}Hz [bin={1}]".format( x_axis_u[p], p))
         plots[2].plot( x_axis_u[p]/u_scale, usb_freq[p], marker='v', color='r')
-    plots[3].axhline( 0.9*numpy.max(lsb_freq) )
-    for p in idx_peakert(lsb_freq, 0.9):
+    #plots[3].axhline( limit*numpy.max(lsb_freq) )
+    for p in idx_peakert(lsb_freq, limit):
         print("Found peak in LSB: f={0:.8f}Hz [bin={1}]".format( x_axis_l[p], p))
-        plots[3].plot( x_axis_l[p]/l_scale, lsb_freq[p], marker='v', color='g')
+        #plots[3].plot( x_axis_l[p]/l_scale, lsb_freq[p], marker='v', color='g')
+        plots[2].plot( x_axis_l[p]/l_scale, lsb_freq[p], marker='v', color='g')
 
     return (lsb, usb)
-
 
 def requantize(ds):
     ds = ((ds // (1.05*numpy.std(ds))).astype(numpy.int8).clip(-2, 1) + 2).reshape( len(ds)//4, 4 )
@@ -976,6 +1156,34 @@ def tones_g(npoint, tones, amplitude=1.0, tp=numpy.float64):
     while True:
         yield template
 
+def tones_g_heap(npoint, tones, dc_freq=None, bandwidth=None, dc_idx=0, amplitude=1.0, tp=numpy.float64, nspec_p_heap=128):
+    t_idx = []
+    t_f   = []
+    t_amp = []
+    try:
+        for tone in tones:
+            if isinstance(tone, tuple):
+                (tone_f, tone_a) = tone
+            else:
+                (tone_f, tone_a) = (tone, amplitude)
+            toneidx = int((float(tone_f - dc_freq) / bandwidth) * npoint)
+            assert toneidx>=0 and toneidx<npoint
+            t_f.append( ((float(toneidx)/npoint) * bandwidth)  )
+            t_idx.append( toneidx )
+            t_amp.append( tp(tone_a)  )
+    except TypeError:
+        toneidx = int((float(tones - dc_freq) / bandwidth) * npoint)
+        assert toneidx>=0 and toneidx<npoint
+        t_f.append( ((float(toneidx)/npoint) * bandwidth)  )
+        t_idx.append( toneidx )
+        t_amp.append( tp(amplitude) )
+    template = numpy.zeros((nspec_p_heap, npoint), dtype=tp)
+    template[:,t_idx] = t_amp #tp(amplitude)
+    print("Tones @",t_f, " AMP=",t_amp)
+    while True:
+        yield Spectrum(template, DCEdge=0, DCFrequency=dc_freq, BW=bandwidth)
+
+
 def top_hat_g(npoint, lo, hi):
     return tones_g(npoint, range(lo, hi+1))
 
@@ -1145,11 +1353,15 @@ def synthesizer_g_real_2_heap(bw, spectrum_src, **opts):
     # 0    1        2        3           4      5
     # 0                      1           2
     f, plots    = plt.subplots(nrows=3, ncols=1)
-    x_freq      = numpy.linspace(0, bw, 1024)
-    x_scale,un  = rescale(x_freq, "Hz")
+    x_freq      = None         #numpy.linspace(0, bw, 4096)
+    x_scale,un  = (None, None) #rescale(x_freq, "Hz")
     timeseries  = numpy.ndarray(0)
-    plots[0].set_xlim(x_freq[0]/x_scale, x_freq[-1]/x_scale)
     for s in take(userinput.nspec, spectrum_src):
+        print("synthesizer_g_real_2_heap/taking in spectra of shape ",s.shape)
+        if x_freq is None:
+            x_freq      = numpy.linspace(0, s.BW, s.shape[1])
+            x_scale,un  = rescale(x_freq, "Hz")
+            plots[0].set_xlim(x_freq[0]/x_scale, x_freq[-1]/x_scale)
         plots[0].plot( x_freq/x_scale, numpy.sum(numpy.abs(s), axis=0) )
 
         # spectrum is symmetric - that is, we NEED it to be in order to get a real timeseries
