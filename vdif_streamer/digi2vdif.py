@@ -8,10 +8,10 @@ os.environ['TZ'] = ''
 time.tzset()
 # Right. NOW we can move on with our lives
 from vdif_header import VDIF_Header
-import beam_red_meerkat as beam_red
+import digi_red_meerkat as digi_red
+
 
 import numpy 
-import numpy.ctypeslib as npct
 
 import argparse, math, calendar, fractions, collections, re
 from datetime import datetime
@@ -34,7 +34,7 @@ class Data_Reader(object):
         self.lo_freq    = lo_freq
         self.bandwidth  = bandwidth
         self.skip_samps = sample_offset
-        self.ddc        = beam_red.ddc(lo_freq, abs(self.beamformed.bandwidth*2), abs(self.bandwidth*2))
+        self.ddc        = digi_red.ddc(lo_freq, abs(self.beamformed.bandwidth*2), abs(self.bandwidth*2))
         # start with empty 2 by 0 ndarray; we always get lsb, usb from 1 lo
         self.data       = numpy.ndarray((2,0)) #self.read()
 
@@ -48,9 +48,11 @@ class Data_Reader(object):
     def read(self):
         # stay here until the DDC has released at least one chunk of time series
         time_data = numpy.ndarray((0))
+        foo = 0
         while True:
             spectral_data = next(self.beamformed)
-            time_data     = numpy.hstack([time_data, beam_red.freq_to_time(spectral_data)])
+            time_data     = numpy.hstack([time_data, digi_red.freq_to_time(spectral_data)])
+            foo = foo + 1
             # make sure we have more samples than we need to skip before we skip
             if len(time_data)<self.skip_samps:
                 continue
@@ -83,7 +85,7 @@ def parse_vex_time(text):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="This script converts beamformer obs into "
+        description="This script converts digitizer .npy data into "
         "one VDIF data stream.\n"
         "The parameters for conversion can be parsed from a VEX file, or "
         "overridden manually")
@@ -113,10 +115,10 @@ if __name__ == "__main__":
                               help="The output sample rate in MS/s")
 
 
-    parser.add_argument("data_dir1",
-                        help="Data directory of the first polarization")
-    parser.add_argument("data_dir2",
-                        help="Data directory of the second polarization")
+    parser.add_argument("data_file",
+                        help="Data file containing the digitizer output, in numpy format")
+    parser.add_argument("sync_file",
+                        help="HDF5 correlator or beamformer data file - only used to extract SyncTime for the system from")
     parser.add_argument("output",
                         help="Output file to dump VDIF frame, "
                         "has to be a new file")
@@ -185,9 +187,7 @@ if __name__ == "__main__":
         output_sample_rate = opts.sample_rate * 1e6
     assert int(output_sample_rate) == output_sample_rate, "Requested output sample rate is not integer"
     
-    info1 = beam_red.Observation(opts.data_dir1)
-    info2 = beam_red.Observation(opts.data_dir2)
-    assert info1.centre_freq == info2.centre_freq, "The observations' centre frequency does not match"
+    info1 = digi_red.Observation(opts.data_file, opts.sync_file)
     if opts.DDC_freq is not None:
         ddc_freq = opts.DDC_freq
 
@@ -195,9 +195,6 @@ if __name__ == "__main__":
     lo_freq = float(ddc_freq)*1e6 - info1.dc_freq 
 
     # compute the number of spectra per second and bail if it's not an integer number
-    assert info1.spectra_p_s == info2.spectra_p_s, "The number of spectra per second is not equal for the observations"
-    spectra_per_second = info1.spectra_p_s
-    assert info1.sync_time == info2.sync_time
     if opts.start is not None:
         start = parse_vex_time(opts.start)
     if opts.end is not None:
@@ -214,7 +211,7 @@ if __name__ == "__main__":
     # if no start time given, take it from the observation that started last
     # note that from here on we convert the start time to seconds since syncing
     if start is None:
-        start = info1.seconds_since_sync( max(info1.begin_spectra, info2.begin_spectra) )
+        start = info1.seconds_since_sync( info1.begin_spectra )
     else:
         # info1.sync_time == info2.sync_time (asserted above) so we can Just Do This(tm)
         start -= info1.sync_time
@@ -230,8 +227,6 @@ if __name__ == "__main__":
     # Because we cannot guarantee that both observations actually start/end with the same spectra we must validate
     assert info1.begin_spectra <= start_specnum[0] < info1.end_spectra, \
             "Requested start time out of bounds of datafile 1: {0} <= {1} < {2}".format(info1.begin_spectra, start_specnum[0], info1.end_spectra)
-    assert info2.begin_spectra <= start_specnum[0] < info2.end_spectra, \
-            "Requested start time out of bounds of datafile 2: {0} <= {1} < {2}".format(info2.begin_spectra, start_specnum[0], info2.end_spectra)
 
     # Repeat for the end time (only use the observation that finished first ...)
     if end is None:
@@ -243,8 +238,6 @@ if __name__ == "__main__":
     end_specnum     = info1.specnum_from_time(vdif_compat_end)
     assert info1.begin_spectra < end_specnum[0] <= info1.end_spectra, \
             "Requested end time out of bounds of datafile 1: {0} < {1} <= {2}".format(info1.begin_spectra, end_specnum[0], info1.end_spectra)
-    assert info2.begin_spectra < end_specnum[0] <= info2.end_spectra, \
-            "Requested end time out of bounds of datafile 2: {0} < {1} <= {2}".format(info2.begin_spectra, end_specnum[0], info2.end_spectra)
 
     print(" decided on start_specnum=", start_specnum)
     print("       => ", asvex(vdif_compat_start+info1.sync_time) )
@@ -263,17 +256,12 @@ if __name__ == "__main__":
     end             += info1.sync_time
     print(" Start UNIX time stamp   = ", asvex(start_timestamp))
     print(" Start VDIF frame number = ", start_framenr)
-
     # The start/end spectra numbers can be propagated to the beamform readers
-    beam1 = beam_red.read_beamformdata(
+    beam1 = digi_red.read_beamformdata(
         info1, specnum=start_specnum[0], end_specnum=end_specnum[0],
-        verbose=opts.verbose, raw=False, readheaps=1024)
-    beam2 = beam_red.read_beamformdata(
-        info2, specnum=start_specnum[0], end_specnum=end_specnum[0],
-        verbose=opts.verbose,raw=False, readheaps=1024)
+        verbose=opts.verbose, raw=False)
 
     data1 = None
-    data2 = None
     def inc_header(header):
         header.frame_number += 1
         if header.frame_number >= vdif_frames_per_second:
@@ -319,7 +307,6 @@ if __name__ == "__main__":
             # The data readers must be informed about how many samples to initially skip 
             # to end up at the sample to actually start working with!
             reader1     = Data_Reader(beam1, lo_freq, bandwidth, sample_offset=start_specnum[1])
-            reader2     = Data_Reader(beam2, lo_freq, bandwidth, sample_offset=start_specnum[1])
             threadState = dict()
             endSecond   = -1
             while True:
@@ -328,26 +315,20 @@ if __name__ == "__main__":
                 #while reader1.data.size < samples_per_frame:
                 while reader1.size < samples_per_frame:
                     reader1.extend()
-                #while reader2.data.size < samples_per_frame:
-                while reader2.size < samples_per_frame:
-                    reader2.extend()
-
                 # We can compute how many frames' worth of data we have available
-                nFrame          = (min(reader1.size, reader2.size) // samples_per_frame)
+                nFrame          = reader1.size // samples_per_frame
                 # from there we can work out how many samples that are
                 nSample         = nFrame * samples_per_frame
                 # and also how many bytes that is
                 nBytes          = nSample // 4
                 if opts.verbose:
-                    print("writing", nFrame, "frames", " [nSample:", nSample,"used",min(reader1.size, reader2.size),"avail] [nBytes=",nBytes,"] dT=",time.time() - run_start)
+                    print("writing", nFrame, "frames", " [nSample:", nSample,"used",reader1.size,"avail] [nBytes=",nBytes,"] dT=",time.time() - run_start)
                 # loop over lsb, usb per polarization, write out all frames
                 # tid      pol     sb   sb_vex
-                # 0        H       LSB   USB   [KAT7 data is LSB so this chunk is 'high end' of the spectrum, so USB wrt LO]
-                # 1        H       USB   LSB   [ ..          ..                   'low  end'    ...              LSB wrt LO]
-                # 2        V       LSB   USB
-                # 3        V       USB   LSB
+                # 0        ?       LSB   USB   [KAT7 data is LSB so this chunk is 'high end' of the spectrum, so USB wrt LO]
+                # 1        ?       USB   LSB   [ ..          ..                   'low  end'    ...              LSB wrt LO]
                 thread = 0
-                for reader in [reader1, reader2]:
+                for reader in [reader1]:
                     for sb in [0,1]:
                         # compute quantization level for this dataset
 #                        ds = reader.data[sb][:nSample]

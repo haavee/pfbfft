@@ -1,9 +1,11 @@
-import math, random, numpy, itertools, rdvdif3, operator, functools, fractions, userinput, hilbert, peak
+#import math, random, numpy, itertools, rdvdif3, operator, functools, fractions, userinput, hilbert, peak
+import math, random, numpy, itertools, rdvdif3, operator, functools, fractions, hilbert, peak
 # magic!  (ylppa = apply spelled backwards :D)
 ylppa = lambda *args, **kwargs: lambda f: f(*args, **kwargs)
 
 
-D = userinput.debug
+#D = userinput.debug
+D = lambda *args: None
 
 class Spectrum(numpy.ndarray):
     def __new__(cls, input_array, **kwargs):
@@ -1155,6 +1157,12 @@ def tones_g(npoint, tones, amplitude=1.0, tp=numpy.float64):
     template[tones] = tp(amplitude)
     while True:
         yield template
+
+def noise_g_heap(npoint, nspec_p_heap):
+    noise_gen = gaussian_noise_g(npoint * nspec_p_heap)
+    while True:
+        block = next(noise_gen)
+        yield block.reshape((nspec_p_heap, npoint))
 
 def tones_g_heap(npoint, tones, dc_freq=None, bandwidth=None, dc_idx=0, amplitude=1.0, tp=numpy.float64, nspec_p_heap=128):
     t_idx = []

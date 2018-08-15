@@ -1,4 +1,4 @@
-import struct, os, collections, datetime
+import struct, os, collections, datetime, functools
 
 def mapfold(fn, lst, init):
     # fn(acc, res) => (acc, res)
@@ -12,8 +12,8 @@ def mapfold(fn, lst, init):
 
 class vdif_frame(object):
     def __init__(self, vdif_file, rdData=True):
-        bytes = vdif_file.read(16)
-        l = struct.unpack("<4I", bytes)
+        byt = vdif_file.read(16)
+        l = struct.unpack("<4I", byt)
         self.hdr  = l[0:4]
         # skip 16 bytes if not legacy
         if not self.legacy():
@@ -78,10 +78,18 @@ class vdif_frame(object):
         # return as string?
         return "{0}{1} [0x{2:X}]".format( chr(self.hdr[3]&0xff00), chr(self.hdr[3]&0xff), int(self.hdr[3]&0xffff) )
         
-    def timeVex(self):
+    def timeVex_err(self):
         # epoch counts number of half years since 2000
         (ny, nhalf) = divmod(self.VDIFEpoch(), 2)
         (y, m, d)   = (2000 + ny, 6*nhalf, 1)
+        (_, _, _, h, m, s, _, _, _)  \
+                    = (datetime.datetime(2000+ny, 0, 0) + datetime.timedelta( float(self.time())/86400.0 )).timetuple()
+        return "{0:04d}y{1:02d}/{2:02d}T{3:02d}h{4:02d}m{5:02d}s".format( y, m, d, h, m, s )
+
+    def timeVex(self):
+        # epoch counts number of half years since 2000
+        (ny, nhalf) = divmod(self.VDIFEpoch(), 2)
+        (y, m, d)   = (2000 + ny, (6*nhalf)+1, 1)
         (y, m, d, h, m, s, dow, doy, tz)  \
                     = (datetime.datetime(y, m, d) + datetime.timedelta( float(self.time())/86400.0 )).timetuple()
         return "{0:04d}y{1:03d}d{2:02d}h{3:02d}m{4:02d}s".format( y, doy, h, m, s )
@@ -126,7 +134,7 @@ class vdif_frame(object):
 def frames(filenm, n, rddata):
     if n is None:
         n = -1
-    with open(filenm) as f:
+    with open(filenm, "rb") as f:
         cnt = 0
         while (n<0 or cnt<n):
             vf = vdif_frame( f, rddata )
@@ -181,4 +189,4 @@ def rdfile(fn, n=None):
 
 if __name__ == "__main__":
     import sys
-    map(rdfile, sys.argv[1:])
+    functools.reduce(lambda acc, x: acc, map(rdfile, sys.argv[1:]), None)
