@@ -91,7 +91,8 @@ class vdif_frame(object):
         (ny, nhalf) = divmod(self.VDIFEpoch(), 2)
         (y, m, d)   = (2000 + ny, (6*nhalf)+1, 1)
         (y, m, d, h, m, s, dow, doy, tz)  \
-                    = (datetime.datetime(y, m, d) + datetime.timedelta( float(self.time())/86400.0 )).timetuple()
+                    = (datetime.datetime(y, m, d) + datetime.timedelta( float(self.time())/86400.0 )).timetuple() if \
+                      (y>0 and m>0 and d>0) else [0]*9
         return "{0:04d}y{1:03d}d{2:02d}h{3:02d}m{4:02d}s".format( y, doy, h, m, s )
 
     def deChannelize(self):
