@@ -1,13 +1,15 @@
-from __future__ import print_function
-from functools import partial, reduce
-from itertools import product, repeat
-from operator  import truth, contains, eq, is_not, attrgetter, itemgetter, methodcaller, __add__, is_
+from __future__  import print_function
+from functools   import partial, reduce
+from itertools   import product, repeat
+from operator    import truth, contains, eq, is_not, attrgetter, itemgetter, methodcaller, __add__, is_
+from collections import deque
 
 # everybody SHOULD love function composition :-)
 compose     = lambda *fns   : (lambda x: reduce(lambda acc, f: f(acc), reversed(fns), x))
 choice      = lambda p, t, f: (lambda x: t(x) if p(x) else f(x))  # branch
 choice_kw   = lambda p, t, f: (lambda x, **kwargs: t(x, **kwargs) if p(x, **kwargs) else f(x, **kwargs))  # branch
 ylppa       = lambda x      : (lambda f: f(x))                    # ylppa is 'apply' in reverse ...
+pam         = lambda *fns   : lambda x: tuple(map(lambda f: f(x), fns)) # pam is map in reverse
 combine     = lambda f, *fns: (lambda x: f(*map(ylppa(x), fns)))  # f( fn[0](x), fn[1](x), ... )
 swap_args   = lambda f      : (lambda a, b, *args, **kwargs: f(b, a, *args, **kwargs))
 logic_or    = lambda x, y   : x or y                              # operator.__or__ / __and__ are /bitwise/ ops!
@@ -46,6 +48,12 @@ listify     = choice(is_iterable, identity, lambda x: [x])
 mk_list     = lambda *args: list(args)
 mk_tuple    = lambda *args: args
 truth_tbl   = lambda *args: tuple(map(truth, args))
+# Under Py3 it is sometimes necessary to drain a sequence for its sideeffects only.
+# "map(print, ...)" comes to mind.
+consume     = lambda c: deque(c, maxlen=0)
+Map         = lambda f: partial(map, f)
+GetN        = itemgetter
+GetA        = attrgetter
 
 def Print(x):
     print(x)
