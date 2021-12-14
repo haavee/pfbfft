@@ -66,7 +66,8 @@ class vdif_frame(object):
         # erroneous version of jive5ab ... [if only we know who the author of
         # that PoS was!!!]
         bps = ((self.hdr[3]>>26) & 0x1f) + 1
-        return (bps-1 if (bps % 2) else bps)
+        return bps
+        #return (bps-1 if (bps % 2) else bps)
 
     def threadID(self):
         # 10 bits in word 3; 16:25
@@ -185,7 +186,13 @@ luts = { 1: mk_lut_1bit(), 2:mk_lut_2bit() }
 ############################
 def rdfile(fn, n=None):
     for frm in frames(fn, n, False):
-        print( "{0} THRD:{1} NCH:{2}@{3}bps{4}".format(str(frm), frm.threadID(), frm.nChannels(), frm.bitsPerSample(), " (Legacy)" if frm.legacy() else "") )
+        flags = []
+        if frm.legacy():
+            flags.append("Legacy")
+        if frm.complex():
+            flags.append("Complex")
+        print( "{0} THRD:{1} NCH:{2}@{3}bps DATA:{4}".format(str(frm), frm.threadID(), frm.nChannels(), frm.bitsPerSample(), frm.dataArraySize()),
+               "(", ",".join(flags), ")" )
 
 
 if __name__ == "__main__":
