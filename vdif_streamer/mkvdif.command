@@ -2,3 +2,4 @@ python -m cProfile -o profile_fake.out ./vdif_streamer.py /mnt/disk2/MeerKAT/vlb
 ~/anaconda3/bin/python ~/pfbfft/vdif_streamer/vdif_streamer.py 1541081970_i0_tied_array_channelised_voltage_0x.h5 1541081970_i0_tied_array_channelised_voltage_0y.h5 -s 2018y305d14h20m0s -e  2018y305d14h20m10s /data/verkouter/n18l3_me_no0006.vdif -f 1658.49 -r 64
 # Note: the no0006 was the scan from N18L1 schedule, in N18L3 the 14h20m0s-14h20m10s range is in scan No0018
 #       so: $> mv /data/verkouter/n18l3_me_no0006.vdif /data/verkouter/n18l3_me_no0018.vdif
+~/anaconda3/bin/python ~/pfbfft/vdif_streamer/vdif_streamer.py 1541078019_i0_tied_array_channelised_voltage_0x.h5 1541078019_i0_tied_array_channelised_voltage_0y.h5 -s 2018y305d13h15m0s -e  2018y305d13h15m10s /data/verkouter/n18l3_me_no0010.vdif -f 1658.49 -r 64

@@ -20,7 +20,6 @@ class vdif_frame(object):
             vdif_file.seek(16, os.SEEK_CUR)
         # read data array
         daSz = self.dataArraySize()
-        #self.data = struct.unpack("<{0}B".format(daSz), vdif_file.read(daSz) )
         if rdData:
             self.data = struct.unpack("<{0}I".format(daSz/4), vdif_file.read(daSz) )
         else:
@@ -79,14 +78,6 @@ class vdif_frame(object):
         # return as string?
         return "{0}{1} [0x{2:X}]".format( chr(self.hdr[3]&0xff00), chr(self.hdr[3]&0xff), int(self.hdr[3]&0xffff) )
         
-    def timeVex_err(self):
-        # epoch counts number of half years since 2000
-        (ny, nhalf) = divmod(self.VDIFEpoch(), 2)
-        (y, m, d)   = (2000 + ny, 6*nhalf, 1)
-        (_, _, _, h, m, s, _, _, _)  \
-                    = (datetime.datetime(2000+ny, 0, 0) + datetime.timedelta( float(self.time())/86400.0 )).timetuple()
-        return "{0:04d}y{1:02d}/{2:02d}T{3:02d}h{4:02d}m{5:02d}s".format( y, m, d, h, m, s )
-
     def timeVex(self):
         # epoch counts number of half years since 2000
         (ny, nhalf) = divmod(self.VDIFEpoch(), 2)
@@ -141,43 +132,7 @@ def frames(filenm, n, rddata):
         while (n<0 or cnt<n):
             vf = vdif_frame( f, rddata )
             yield vf
-            #f.seek(vf.byteSize()-16, os.SEEK_CUR)
             cnt += 1
-
-
-# decode a VDIF frame into a dict of sample streams -
-# one stream per channel
-def decode_file(fn, n=None):
-    for frm in frames(fn, n, True):
-        yield frm.deChannelize()
-    
-
-# LUTs taken from Walter Brisken's mark5access library
-# 1 bit lookup table
-def mk_lut_1bit():
-    lut = []
-    for i in range(256):
-        lut.append( [0]*8 )
-        for ch in range(8):
-            lut[-1][ch] = 1.0 if (i & 0x1) else -1.0
-            i >>= 1
-    return lut
-
-
-HiMag = 3.3359
-# 2-bit levels: 00 = lowest, 01 = -sigma, 10 = +sigma, 11 = highest
-twobitLevels = { 0:-HiMag, 1:-1.0, 2:1.0, 3:HiMag }
-
-def mk_lut_2bit():
-    lut = []
-    for i in range(256):
-        lut.append( [0]*4 )
-        for ch in range(4):
-            lut[-1][ch] = twobitLevels[ i & 0x3 ]
-            i >>= 2
-    return lut
-
-luts = { 1: mk_lut_1bit(), 2:mk_lut_2bit() }
 
 ############################
 ##
