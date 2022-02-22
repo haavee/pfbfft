@@ -65,7 +65,7 @@ class vdif_frame(object):
         # erroneous version of jive5ab ... [if only we know who the author of
         # that PoS was!!!]
         bps = ((self.hdr[3]>>26) & 0x1f) + 1
-        return (bps-1 if (bps % 2) else bps)
+        return bps #(bps-1 if (bps>0 and bps % 2) else bps)
 
     def threadID(self):
         # 10 bits in word 3; 16:25
